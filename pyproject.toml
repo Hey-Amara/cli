@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "amara-cli"
+version = "1.0.0"
+description = "Hey Amara developer CLI — setup, env management, cluster access, and more."
+requires-python = ">=3.9"
+dependencies = [
+    "click>=8.0",
+    "InquirerPy>=0.3.4",
+]
+
+[project.scripts]
+heyamara = "amara_cli.main:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
