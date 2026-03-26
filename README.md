@@ -18,10 +18,10 @@ curl -fsSL https://raw.githubusercontent.com/heyamara/cli/main/install.sh | bash
 
 ```bash
 # Using pipx (recommended — isolated install)
-pipx install https://github.com/heyamara/cli/releases/latest/download/amara-cli.tar.gz
+pipx install https://github.com/heyamara/cli/releases/latest/download/heyamara-cli.tar.gz
 
 # Or using pip
-pip install https://github.com/heyamara/cli/releases/latest/download/amara-cli.tar.gz
+pip install https://github.com/heyamara/cli/releases/latest/download/heyamara-cli.tar.gz
 ```
 
 ### Upgrade
@@ -31,7 +31,7 @@ pip install https://github.com/heyamara/cli/releases/latest/download/amara-cli.t
 curl -fsSL https://raw.githubusercontent.com/heyamara/cli/main/install.sh | bash
 
 # Or manually
-pipx upgrade amara-cli
+pipx upgrade heyamara-cli
 ```
 
 ### Enable Shell Completions

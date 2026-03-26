@@ -2,7 +2,7 @@
 
 import click
 
-from amara_cli.config import NAMESPACES, SERVICES
+from heyamara_cli.config import NAMESPACES, SERVICES
 
 
 class ServiceType(click.ParamType):

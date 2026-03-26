@@ -1,7 +1,7 @@
 import click
 
-from amara_cli import config
-from amara_cli.helpers import require_tool, run
+from heyamara_cli import config
+from heyamara_cli.helpers import require_tool, run
 
 
 @click.command()

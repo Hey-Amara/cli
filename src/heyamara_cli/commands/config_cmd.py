@@ -3,8 +3,8 @@ import os
 
 import click
 
-from amara_cli import config
-from amara_cli.prompts import select
+from heyamara_cli import config
+from heyamara_cli.prompts import select
 
 
 def _list_aws_profiles() -> list[str]:

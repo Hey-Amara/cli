@@ -3,7 +3,7 @@ import shutil
 
 import click
 
-from amara_cli.helpers import run
+from heyamara_cli.helpers import run
 
 TOOLS = {
     "aws": {

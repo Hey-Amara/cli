@@ -1,9 +1,9 @@
 import click
 
-from amara_cli.completions import ENVIRONMENT, SERVICE
-from amara_cli.config import NAMESPACES, SERVICES
-from amara_cli.helpers import require_tool, run
-from amara_cli.prompts import select
+from heyamara_cli.completions import ENVIRONMENT, SERVICE
+from heyamara_cli.config import NAMESPACES, SERVICES
+from heyamara_cli.helpers import require_tool, run
+from heyamara_cli.prompts import select
 
 
 ENVS = list(NAMESPACES.keys())

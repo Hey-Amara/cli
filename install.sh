@@ -41,11 +41,11 @@ fi
 if [ "$VERSION" = "latest" ]; then
     info "Fetching latest release..."
     DOWNLOAD_URL=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
-        | grep '"browser_download_url".*amara-cli.*\.tar\.gz"' \
+        | grep '"browser_download_url".*heyamara-cli.*\.tar\.gz"' \
         | head -1 \
         | sed 's/.*"browser_download_url": "\(.*\)"/\1/')
 else
-    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/amara-cli-${VERSION#v}.tar.gz"
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/heyamara-cli-${VERSION#v}.tar.gz"
 fi
 
 if [ -z "$DOWNLOAD_URL" ]; then
@@ -56,13 +56,13 @@ info "Downloading from ${DOWNLOAD_URL}..."
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-curl -fsSL "$DOWNLOAD_URL" -o "${TMP_DIR}/amara-cli.tar.gz"
+curl -fsSL "$DOWNLOAD_URL" -o "${TMP_DIR}/heyamara-cli.tar.gz"
 
 info "Installing with ${INSTALLER}..."
 if [ "$INSTALLER" = "pipx" ]; then
-    pipx install "${TMP_DIR}/amara-cli.tar.gz" --force
+    pipx install "${TMP_DIR}/heyamara-cli.tar.gz" --force
 else
-    $INSTALLER install "${TMP_DIR}/amara-cli.tar.gz" --force-reinstall --quiet
+    $INSTALLER install "${TMP_DIR}/heyamara-cli.tar.gz" --force-reinstall --quiet
 fi
 
 # Verify installation

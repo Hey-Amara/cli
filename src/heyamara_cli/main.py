@@ -2,15 +2,15 @@ import importlib.metadata
 
 import click
 
-from amara_cli.commands.cluster import cluster
-from amara_cli.commands.completions import completions
-from amara_cli.commands.config_cmd import config_cmd
-from amara_cli.commands.connect import connect
-from amara_cli.commands.env import env
-from amara_cli.commands.k8s import logs, shell, status
-from amara_cli.commands.login import login
-from amara_cli.commands.setup import setup
-from amara_cli.commands.update import update
+from heyamara_cli.commands.cluster import cluster
+from heyamara_cli.commands.completions import completions
+from heyamara_cli.commands.config_cmd import config_cmd
+from heyamara_cli.commands.connect import connect
+from heyamara_cli.commands.env import env
+from heyamara_cli.commands.k8s import logs, shell, status
+from heyamara_cli.commands.login import login
+from heyamara_cli.commands.setup import setup
+from heyamara_cli.commands.update import update
 
 
 class AmaraCLI(click.Group):
@@ -39,7 +39,7 @@ def cli(ctx):
 @cli.command()
 def version():
     """Show the CLI version."""
-    ver = importlib.metadata.version("amara-cli")
+    ver = importlib.metadata.version("heyamara-cli")
     click.echo(f"heyamara-cli {ver}")
 
 

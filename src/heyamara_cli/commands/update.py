@@ -44,7 +44,7 @@ def update(check):
       heyamara update          # Download and install latest
       heyamara update --check  # Just check if an update is available
     """
-    current = importlib.metadata.version("amara-cli")
+    current = importlib.metadata.version("heyamara-cli")
     click.echo(f"Current version: {current}")
     click.echo("Checking for updates...")
 
@@ -78,7 +78,7 @@ def update(check):
     click.echo(f"Downloading {download_url}...")
 
     with tempfile.TemporaryDirectory() as tmp_dir:
-        tarball = f"{tmp_dir}/amara-cli.tar.gz"
+        tarball = f"{tmp_dir}/heyamara-cli.tar.gz"
         dl = subprocess.run(
             ["curl", "-fsSL", download_url, "-o", tarball],
             capture_output=True,

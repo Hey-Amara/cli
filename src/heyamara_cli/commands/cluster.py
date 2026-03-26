@@ -1,10 +1,10 @@
 import click
 
-from amara_cli import config
-from amara_cli.completions import ENVIRONMENT
-from amara_cli.config import CLUSTERS, NAMESPACES
-from amara_cli.helpers import check_tool, require_aws_session, run
-from amara_cli.prompts import select
+from heyamara_cli import config
+from heyamara_cli.completions import ENVIRONMENT
+from heyamara_cli.config import CLUSTERS, NAMESPACES
+from heyamara_cli.helpers import check_tool, require_aws_session, run
+from heyamara_cli.prompts import select
 
 
 @click.command()

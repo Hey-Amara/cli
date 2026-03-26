@@ -4,11 +4,11 @@ import os
 
 import click
 
-from amara_cli import config
-from amara_cli.completions import ENVIRONMENT, SERVICE
-from amara_cli.config import SERVICES, SSM_PREFIX
-from amara_cli.helpers import require_aws_session, run
-from amara_cli.prompts import select
+from heyamara_cli import config
+from heyamara_cli.completions import ENVIRONMENT, SERVICE
+from heyamara_cli.config import SERVICES, SSM_PREFIX
+from heyamara_cli.helpers import require_aws_session, run
+from heyamara_cli.prompts import select
 
 ENVS = ["dev", "staging", "production"]
 
