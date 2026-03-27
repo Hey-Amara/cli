@@ -64,5 +64,20 @@ SERVICES = [
     "meeting-bot",
 ]
 
+# Services with multiple deployments — shown as sub-picker in logs/shell
+SUB_SERVICES = {
+    "ai-backend": [
+        "ai-api-gateway",
+        "ai-orchestrator",
+        "ai-conversation-service",
+        "ai-company-research",
+        "ai-voice-agent",
+    ],
+    "meeting-bot": [
+        "meeting-bot-api",
+        "meeting-bot-worker",
+    ],
+}
+
 REQUIRED_TOOLS = ["aws", "kubectl"]
 OPTIONAL_TOOLS = ["k9s", "helm", "helmfile", "sops"]
