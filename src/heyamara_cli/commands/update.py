@@ -8,7 +8,7 @@ import tempfile
 import click
 
 
-REPO = "heyamara/cli"
+REPO = "Hey-Amara/cli"
 
 
 def _get_latest_release() -> dict:

@@ -3,14 +3,14 @@
 # HeyAmara CLI installer
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/heyamara/cli/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Hey-Amara/cli/main/install.sh | bash
 #
 # Or with a specific version:
 #   curl -fsSL ... | bash -s -- v1.0.0
 # =============================================================================
 set -euo pipefail
 
-REPO="heyamara/cli"
+REPO="Hey-Amara/cli"
 INSTALL_DIR="${HOME}/.local/bin"
 VERSION="${1:-latest}"
 
