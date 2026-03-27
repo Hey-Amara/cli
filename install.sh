@@ -41,7 +41,7 @@ fi
 if [ "$VERSION" = "latest" ]; then
     info "Fetching latest release..."
     DOWNLOAD_URL=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
-        | grep '"browser_download_url".*heyamara.cli.*\.tar\.gz"' \
+        | grep '"browser_download_url".*\.tar\.gz"' \
         | head -1 \
         | sed 's/.*"browser_download_url": "\(.*\)"/\1/')
 else
