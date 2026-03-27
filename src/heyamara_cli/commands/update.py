@@ -1,36 +1,40 @@
 import importlib.metadata
-import json
 import shutil
 import subprocess
 import sys
-import tempfile
 
 import click
 
 
 REPO = "Hey-Amara/cli"
+GIT_URL = f"git+https://github.com/{REPO}.git"
 
 
-def _get_latest_release() -> dict:
-    """Fetch latest release info from GitHub API."""
+def _get_latest_version() -> str:
+    """Fetch latest release tag from GitHub via gh CLI or API."""
+    # Try gh CLI first (handles private repos with auth)
+    if shutil.which("gh"):
+        result = subprocess.run(
+            ["gh", "release", "view", "--repo", REPO, "--json", "tagName", "--jq", ".tagName"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip().lstrip("v")
+
+    # Fallback to git ls-remote (works with git credentials)
     result = subprocess.run(
-        ["curl", "-fsSL", f"https://api.github.com/repos/{REPO}/releases/latest"],
+        ["git", "ls-remote", "--tags", "--sort=-v:refname", f"https://github.com/{REPO}.git"],
         capture_output=True,
         text=True,
     )
-    if result.returncode != 0:
-        return {}
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return {}
+    if result.returncode == 0 and result.stdout.strip():
+        # Parse latest tag: "refs/tags/v1.0.0" -> "1.0.0"
+        for line in result.stdout.strip().splitlines():
+            ref = line.split("refs/tags/")[-1]
+            if ref.startswith("v"):
+                return ref.lstrip("v")
 
-
-def _get_download_url(release: dict) -> str:
-    """Extract the .tar.gz download URL from a release."""
-    for asset in release.get("assets", []):
-        if asset["name"].endswith(".tar.gz"):
-            return asset["browser_download_url"]
     return ""
 
 
@@ -48,15 +52,10 @@ def update(check):
     click.echo(f"Current version: {current}")
     click.echo("Checking for updates...")
 
-    release = _get_latest_release()
-    if not release:
-        click.secho("Could not fetch release info from GitHub.", fg="red")
-        click.echo(f"Check manually: https://github.com/{REPO}/releases")
-        raise SystemExit(1)
-
-    latest = release.get("tag_name", "").lstrip("v")
+    latest = _get_latest_version()
     if not latest:
-        click.secho("Could not determine latest version.", fg="red")
+        click.secho("Could not fetch version info from GitHub.", fg="red")
+        click.echo(f"Check manually: https://github.com/{REPO}/releases")
         raise SystemExit(1)
 
     if latest == current:
@@ -66,41 +65,35 @@ def update(check):
     click.echo(f"New version available: {latest}")
 
     if check:
-        click.echo(f"Run 'heyamara update' to install.")
+        click.echo("Run 'heyamara update' to install.")
         return
 
-    download_url = _get_download_url(release)
-    if not download_url:
-        click.secho("No downloadable asset found in the release.", fg="red")
-        click.echo(f"Install manually: https://github.com/{REPO}/releases/tag/v{latest}")
+    click.echo(f"Installing from {GIT_URL}...")
+
+    if shutil.which("pipx"):
+        click.echo("Updating with pipx...")
+        result = subprocess.run(
+            ["pipx", "install", GIT_URL, "--force"],
+            capture_output=True,
+            text=True,
+        )
+    else:
+        click.echo("Updating with pip...")
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--upgrade", GIT_URL, "--quiet"],
+            capture_output=True,
+            text=True,
+        )
+
+    if result.returncode != 0:
+        click.secho("Update failed.", fg="red")
+        if result.stderr:
+            click.echo(result.stderr.strip())
         raise SystemExit(1)
 
-    click.echo(f"Downloading {download_url}...")
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        tarball = f"{tmp_dir}/heyamara-cli.tar.gz"
-        dl = subprocess.run(
-            ["curl", "-fsSL", download_url, "-o", tarball],
-            capture_output=True,
-        )
-        if dl.returncode != 0:
-            click.secho("Download failed.", fg="red")
-            raise SystemExit(1)
-
-        # Detect installer
-        if shutil.which("pipx"):
-            click.echo("Installing with pipx...")
-            subprocess.run(["pipx", "install", tarball, "--force"], check=True)
-        else:
-            click.echo("Installing with pip...")
-            subprocess.run(
-                [sys.executable, "-m", "pip", "install", tarball, "--force-reinstall", "--quiet"],
-                check=True,
-            )
-
     # Verify
-    result = subprocess.run(["heyamara", "version"], capture_output=True, text=True)
-    if result.returncode == 0:
+    verify = subprocess.run(["heyamara", "version"], capture_output=True, text=True)
+    if verify.returncode == 0:
         click.secho(f"Updated successfully: {current} -> {latest}", fg="green")
     else:
-        click.secho(f"Update installed but verification failed. Run 'heyamara version' to check.", fg="yellow")
+        click.secho("Update installed but verification failed. Run 'heyamara version' to check.", fg="yellow")

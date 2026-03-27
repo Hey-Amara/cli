@@ -14,24 +14,21 @@ Developer CLI for Hey Amara infrastructure — setup, environment management, cl
 curl -fsSL https://raw.githubusercontent.com/Hey-Amara/cli/main/install.sh | bash
 ```
 
-### Or install manually from GitHub Release
+### Or install manually
 
 ```bash
-# Using pipx (recommended — isolated install)
-pipx install https://github.com/Hey-Amara/cli/releases/latest/download/heyamara-cli.tar.gz
+# From git
+pip install git+https://github.com/Hey-Amara/cli.git
 
-# Or using pip
-pip install https://github.com/Hey-Amara/cli/releases/latest/download/heyamara-cli.tar.gz
+# From release tarball
+pipx install https://github.com/Hey-Amara/cli/releases/latest/download/heyamara_cli-1.0.0.tar.gz
+
 ```
 
 ### Upgrade
 
 ```bash
-# Re-run the install script (auto-fetches latest)
-curl -fsSL https://raw.githubusercontent.com/Hey-Amara/cli/main/install.sh | bash
-
-# Or manually
-pipx upgrade heyamara-cli
+heyamara update
 ```
 
 ### Enable Shell Completions
