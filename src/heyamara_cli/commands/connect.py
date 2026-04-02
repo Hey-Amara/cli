@@ -1,4 +1,5 @@
 import json
+import urllib.parse
 
 import click
 
@@ -12,6 +13,12 @@ from heyamara_cli.prompts import select
 ENVS = list(NAMESPACES.keys())
 
 SERVICES = ["db", "redis", "rabbitmq"]
+
+DB_NAMES = {
+    "dev": "heyamara_dev",
+    "staging": "heyamara_staging",
+    "production": "heyamara_prod",
+}
 
 
 def _resolve_profile(profile: str) -> tuple[str, str]:
@@ -185,20 +192,48 @@ def connect():
     pass
 
 
+def _generate_rds_auth_token(rds_host: str, rds_port: int, db_user: str, profile: str, region: str) -> str:
+    """Generate an IAM auth token for RDS."""
+    result = run(
+        [
+            "aws", "rds", "generate-db-auth-token",
+            "--hostname", rds_host,
+            "--port", str(rds_port),
+            "--username", db_user,
+            "--region", region,
+            "--profile", profile,
+        ],
+        capture=True,
+        check=False,
+    )
+
+    token = result.stdout.strip()
+    if result.returncode != 0 or not token:
+        click.secho("Failed to generate IAM auth token.", fg="red")
+        click.secho("Make sure your IAM role has rds-db:connect permission.", fg="yellow")
+        raise SystemExit(1)
+
+    return token
+
+
 @connect.command()
 @click.argument("environment", required=False, type=ENVIRONMENT)
 @click.option("--local-port", "-p", default=5432, help="Local port.", show_default=True)
 @click.option("--profile", default=None, help="AWS profile.")
-def db(environment, local_port, profile):
+@click.option("--iam", is_flag=True, help="Generate IAM auth token for passwordless login.")
+@click.option("--db-user", "-u", default="developer", help="Database user for IAM auth.", show_default=True)
+def db(environment, local_port, profile, iam, db_user):
     """Connect to RDS (PostgreSQL).
 
     \b
     Examples:
       heyamara connect db dev
-      heyamara connect db dev -p 5433
+      heyamara connect db production --iam
+      heyamara connect db production --iam -u developer -p 5433
 
-    Then connect with:
-      psql -h localhost -p <local-port> -U <user> <database>
+    \b
+    With --iam, generates an IAM auth token and prints
+    ready-to-use psql / DATABASE_URL connection strings.
     """
     if not environment:
         environment = select("Select environment:", ENVS)
@@ -208,8 +243,37 @@ def db(environment, local_port, profile):
     instance_id = _find_eks_node(environment, profile, region)
     rds_host, rds_port = _find_rds_endpoint(environment, profile, region)
 
-    click.secho(f"Tunneling localhost:{local_port} -> {rds_host}:{rds_port}", fg="green")
-    click.secho(f"Connect with: psql -h localhost -p {local_port} -U <user> <database>", fg="cyan")
+    if iam:
+        db_name = DB_NAMES.get(environment, f"heyamara_{environment}")
+
+        click.echo(f"Generating IAM auth token for user '{db_user}'...")
+        token = _generate_rds_auth_token(rds_host, rds_port, db_user, profile, region)
+
+        encoded_token = urllib.parse.quote(token, safe="")
+        database_url = f"postgresql://{db_user}:{encoded_token}@localhost:{local_port}/{db_name}?sslmode=require"
+
+        click.echo()
+        click.secho("=== Connection Details ===", fg="green")
+        click.secho(f"Remote:  {rds_host}:{rds_port}", fg="green")
+        click.secho(f"Local:   localhost:{local_port}", fg="green")
+        click.secho(f"User:    {db_user}", fg="green")
+        click.secho(f"DB:      {db_name}", fg="green")
+        click.echo()
+        click.secho("Run this in another terminal to connect:", fg="cyan")
+        click.echo()
+        click.echo(f"  export DATABASE_URL=\"{database_url}\"")
+        click.echo(f"  psql -d $DATABASE_URL")
+        click.echo()
+        click.echo(f"  # Or without export:")
+        click.echo(f"  PGPASSWORD='{token}' \\")
+        click.echo(f"  psql \"host=localhost port={local_port} dbname={db_name} user={db_user} sslmode=require\"")
+        click.echo()
+        click.secho("Token expires in 15 minutes. Re-run to get a new one.", fg="yellow")
+    else:
+        click.secho(f"Tunneling localhost:{local_port} -> {rds_host}:{rds_port}", fg="green")
+        click.secho(f"Connect with: psql -h localhost -p {local_port} -U <user> <database>", fg="cyan")
+        click.secho("Tip: use --iam to auto-generate an IAM auth token.", fg="yellow")
+
     click.echo("Press Ctrl+C to stop.\n")
 
     _start_tunnel(instance_id, rds_host, rds_port, local_port, profile, region)
