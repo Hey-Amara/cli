@@ -76,7 +76,7 @@ def _find_rds_endpoint(environment: str, profile: str, region: str) -> tuple[str
     result = run(
         [
             "aws", "rds", "describe-db-instances",
-            "--query", f"DBInstances[?contains(DBInstanceIdentifier, '{environment}')].[Endpoint.Address, Endpoint.Port] | [0]",
+            "--query", f"DBInstances[?TagList[?Key=='Environment' && Value=='{environment}']].[Endpoint.Address, Endpoint.Port] | [0]",
             "--output", "json",
             "--region", region,
             "--profile", profile,
@@ -96,10 +96,35 @@ def _find_rds_endpoint(environment: str, profile: str, region: str) -> tuple[str
 
 def _find_redis_endpoint(environment: str, profile: str, region: str) -> tuple[str, int]:
     """Auto-discover the Redis endpoint for the environment."""
+    # ElastiCache describe-replication-groups doesn't return tags inline,
+    # so use resourcegroupstaggingapi to find the replication group by Environment tag.
+    result = run(
+        [
+            "aws", "resourcegroupstaggingapi", "get-resources",
+            "--tag-filters", f"Key=Environment,Values={environment}",
+            "--resource-type-filters", "elasticache:replication-group",
+            "--query", "ResourceTagMappingList[0].ResourceARN",
+            "--output", "text",
+            "--region", region,
+            "--profile", profile,
+        ],
+        capture=True,
+        check=False,
+        environment=environment,
+    )
+
+    arn = result.stdout.strip()
+    if not arn or arn == "None":
+        click.secho(f"No Redis cluster found for {environment}", fg="red")
+        raise SystemExit(1)
+
+    group_id = arn.rsplit(":", 1)[-1]
+
     result = run(
         [
             "aws", "elasticache", "describe-replication-groups",
-            "--query", f"ReplicationGroups[?contains(ReplicationGroupId, '{environment}')].NodeGroups[0].PrimaryEndpoint.[Address, Port] | [0]",
+            "--replication-group-id", group_id,
+            "--query", "ReplicationGroups[0].NodeGroups[0].PrimaryEndpoint.[Address, Port]",
             "--output", "json",
             "--region", region,
             "--profile", profile,
@@ -119,11 +144,15 @@ def _find_redis_endpoint(environment: str, profile: str, region: str) -> tuple[s
 
 def _find_rabbitmq_endpoint(environment: str, profile: str, region: str) -> tuple[str, int]:
     """Auto-discover the RabbitMQ broker endpoint for the environment."""
+    # AmazonMQ list-brokers doesn't return tags inline,
+    # so use resourcegroupstaggingapi to find the broker by Environment tag.
     result = run(
         [
-            "aws", "mq", "list-brokers",
-            "--query", f"BrokerSummaries[?contains(BrokerName, '{environment}')].[BrokerId, BrokerName] | [0]",
-            "--output", "json",
+            "aws", "resourcegroupstaggingapi", "get-resources",
+            "--tag-filters", f"Key=Environment,Values={environment}",
+            "--resource-type-filters", "mq:broker",
+            "--query", "ResourceTagMappingList[0].ResourceARN",
+            "--output", "text",
             "--region", region,
             "--profile", profile,
         ],
@@ -132,12 +161,12 @@ def _find_rabbitmq_endpoint(environment: str, profile: str, region: str) -> tupl
         environment=environment,
     )
 
-    try:
-        data = json.loads(result.stdout.strip())
-        broker_id = data[0]
-    except (json.JSONDecodeError, IndexError, TypeError):
+    arn = result.stdout.strip()
+    if not arn or arn == "None":
         click.secho(f"No RabbitMQ broker found for {environment}", fg="red")
         raise SystemExit(1)
+
+    broker_id = arn.rsplit(":", 1)[-1]
 
     # Get the broker host from broker ID (format: b-xxx.mq.region.on.aws)
     host = f"{broker_id}.mq.{region}.on.aws"
