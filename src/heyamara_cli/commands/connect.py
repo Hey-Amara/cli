@@ -109,7 +109,7 @@ def _find_redis_endpoint(environment: str, profile: str, region: str) -> tuple[s
         [
             "aws", "resourcegroupstaggingapi", "get-resources",
             "--tag-filters", f"Key=Environment,Values={environment}",
-            "--resource-type-filters", "elasticache:replication-group",
+            "--resource-type-filters", "elasticache:replicationgroup",
             "--query", "ResourceTagMappingList[0].ResourceARN",
             "--output", "text",
             "--region", region,
