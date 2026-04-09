@@ -1,4 +1,8 @@
+from __future__ import annotations
+
 import json
+import shutil
+import subprocess
 import urllib.parse
 
 import click
@@ -6,7 +10,7 @@ import click
 from heyamara_cli import config
 from heyamara_cli.completions import ENVIRONMENT
 from heyamara_cli.config import CLUSTERS, NAMESPACES
-from heyamara_cli.helpers import require_aws_session, run
+from heyamara_cli.helpers import check_port_free, debug, detect_iam_role, require_aws_session, run
 from heyamara_cli.prompts import select
 
 
@@ -21,10 +25,10 @@ DB_NAMES = {
 }
 
 
-def _resolve_profile(profile: str) -> tuple[str, str]:
-    """Resolve profile and region."""
+def _resolve_profile(profile: str, region: str | None = None) -> tuple[str, str]:
+    """Resolve profile and region. region param overrides config."""
     p = profile or config.get("aws_profile")
-    r = config.get("aws_region")
+    r = region or config.get("aws_region")
     return p, r
 
 
@@ -98,6 +102,10 @@ def _find_rds_endpoint(environment: str, profile: str, region: str) -> tuple[str
         return data[0], int(data[1])
     except (json.JSONDecodeError, IndexError, TypeError):
         click.secho(f"No RDS instance found for {environment}", fg="red")
+        click.secho(
+            f"  Ensure the RDS instance has an 'Environment' tag set to '{environment}'.",
+            fg="yellow",
+        )
         raise SystemExit(1)
 
 
@@ -216,20 +224,39 @@ def _generate_rds_auth_token(rds_host: str, rds_port: int, db_user: str, profile
     return token
 
 
+def _copy_to_clipboard(text: str) -> bool:
+    """Copy text to system clipboard. Returns True on success."""
+    for tool in ("pbcopy", "xclip"):
+        if shutil.which(tool):
+            try:
+                cmd = [tool] if tool == "pbcopy" else [tool, "-selection", "clipboard"]
+                subprocess.run(cmd, input=text.encode(), check=True)
+                return True
+            except Exception:
+                pass
+    return False
+
+
 @connect.command()
 @click.argument("environment", required=False, type=ENVIRONMENT)
 @click.option("--local-port", "-p", default=5432, help="Local port.", show_default=True)
 @click.option("--profile", default=None, help="AWS profile.")
+@click.option("--region", default=None, help="AWS region (overrides config).")
 @click.option("--iam", is_flag=True, help="Generate IAM auth token for passwordless login.")
 @click.option("--db-user", "-u", default="developer", help="Database user for IAM auth.", show_default=True)
-def db(environment, local_port, profile, iam, db_user):
+@click.option("--db-name", default=None, help="Database name (overrides auto-detect).")
+@click.option("--no-copy", is_flag=True, help="Do not copy DATABASE_URL to clipboard.")
+@click.option("--dry-run", is_flag=True, help="Show what would happen without executing.")
+def db(environment, local_port, profile, region, iam, db_user, db_name, no_copy, dry_run):
     """Connect to RDS (PostgreSQL).
 
     \b
     Examples:
       heyamara connect db dev
       heyamara connect db production --iam
-      heyamara connect db production --iam -u developer -p 5433
+      heyamara connect db production --iam -u power_user -p 5433
+      heyamara connect db production --iam --dry-run
+      heyamara connect db dev --db-name my_other_db
 
     \b
     With --iam, generates an IAM auth token and prints
@@ -237,27 +264,52 @@ def db(environment, local_port, profile, iam, db_user):
     """
     if not environment:
         environment = select("Select environment:", ENVS)
-    profile, region = _resolve_profile(profile)
-    require_aws_session(profile)
+    profile, region = _resolve_profile(profile, region)
+
+    # Port conflict detection
+    if not dry_run and not check_port_free(local_port):
+        click.secho(f"Port {local_port} is already in use. Use -p to choose another.", fg="red")
+        raise SystemExit(1)
+
+    caller_arn = require_aws_session(profile)
 
     instance_id = _find_eks_node(environment, profile, region)
     rds_host, rds_port = _find_rds_endpoint(environment, profile, region)
 
     if iam:
-        db_name = DB_NAMES.get(environment, f"heyamara_{environment}")
+        resolved_db_name = db_name or DB_NAMES.get(environment, f"heyamara_{environment}")
+
+        # Show detected IAM role as a hint
+        detected_role = detect_iam_role(caller_arn)
+        if detected_role and db_user == "developer" and detected_role != "developer":
+            click.secho(
+                f"Hint: your IAM role is '{detected_role}'. "
+                f"Use -u {detected_role} if that's your DB user.",
+                fg="cyan",
+            )
 
         click.echo(f"Generating IAM auth token for user '{db_user}'...")
-        token = _generate_rds_auth_token(rds_host, rds_port, db_user, profile, region)
 
-        encoded_token = urllib.parse.quote(token, safe="")
-        database_url = f"postgresql://{db_user}:{encoded_token}@localhost:{local_port}/{db_name}?sslmode=require"
+        if not dry_run:
+            token = _generate_rds_auth_token(rds_host, rds_port, db_user, profile, region)
+            encoded_token = urllib.parse.quote(token, safe="")
+            database_url = (
+                f"postgresql://{db_user}:{encoded_token}"
+                f"@localhost:{local_port}/{resolved_db_name}?sslmode=require"
+            )
+        else:
+            token = "<token>"
+            database_url = (
+                f"postgresql://{db_user}:<token>"
+                f"@localhost:{local_port}/{resolved_db_name}?sslmode=require"
+            )
 
         click.echo()
         click.secho("=== Connection Details ===", fg="green")
         click.secho(f"Remote:  {rds_host}:{rds_port}", fg="green")
         click.secho(f"Local:   localhost:{local_port}", fg="green")
         click.secho(f"User:    {db_user}", fg="green")
-        click.secho(f"DB:      {db_name}", fg="green")
+        click.secho(f"DB:      {resolved_db_name}", fg="green")
         click.echo()
         click.secho("Run this in another terminal to connect:", fg="cyan")
         click.echo()
@@ -266,13 +318,29 @@ def db(environment, local_port, profile, iam, db_user):
         click.echo()
         click.echo(f"  # Or without export:")
         click.echo(f"  PGPASSWORD='{token}' \\")
-        click.echo(f"  psql \"host=localhost port={local_port} dbname={db_name} user={db_user} sslmode=require\"")
+        click.echo(
+            f"  psql \"host=localhost port={local_port} dbname={resolved_db_name}"
+            f" user={db_user} sslmode=require\""
+        )
         click.echo()
+
+        if not dry_run and not no_copy:
+            if _copy_to_clipboard(database_url):
+                click.secho("DATABASE_URL copied to clipboard.", fg="green")
+
         click.secho("Token expires in 15 minutes. Re-run to get a new one.", fg="yellow")
     else:
         click.secho(f"Tunneling localhost:{local_port} -> {rds_host}:{rds_port}", fg="green")
         click.secho(f"Connect with: psql -h localhost -p {local_port} -U <user> <database>", fg="cyan")
         click.secho("Tip: use --iam to auto-generate an IAM auth token.", fg="yellow")
+
+    if dry_run:
+        click.echo()
+        click.secho("[dry-run] Would start SSM tunnel:", fg="yellow")
+        click.secho(f"  Instance: {instance_id}", fg="yellow")
+        click.secho(f"  Remote:   {rds_host}:{rds_port}", fg="yellow")
+        click.secho(f"  Local:    localhost:{local_port}", fg="yellow")
+        return
 
     click.echo("Press Ctrl+C to stop.\n")
 
@@ -283,20 +351,28 @@ def db(environment, local_port, profile, iam, db_user):
 @click.argument("environment", required=False, type=ENVIRONMENT)
 @click.option("--local-port", "-p", default=6379, help="Local port.", show_default=True)
 @click.option("--profile", default=None, help="AWS profile.")
-def redis(environment, local_port, profile):
+@click.option("--region", default=None, help="AWS region (overrides config).")
+@click.option("--dry-run", is_flag=True, help="Show what would happen without executing.")
+def redis(environment, local_port, profile, region, dry_run):
     """Connect to Redis (ElastiCache).
 
     \b
     Examples:
       heyamara connect redis dev
       heyamara connect redis dev -p 6380
+      heyamara connect redis dev --dry-run
 
     Then connect with:
       redis-cli -h localhost -p <local-port>
     """
     if not environment:
         environment = select("Select environment:", ENVS)
-    profile, region = _resolve_profile(profile)
+    profile, region = _resolve_profile(profile, region)
+
+    if not dry_run and not check_port_free(local_port):
+        click.secho(f"Port {local_port} is already in use. Use -p to choose another.", fg="red")
+        raise SystemExit(1)
+
     require_aws_session(profile)
 
     instance_id = _find_eks_node(environment, profile, region)
@@ -304,6 +380,15 @@ def redis(environment, local_port, profile):
 
     click.secho(f"Tunneling localhost:{local_port} -> {redis_host}:{redis_port}", fg="green")
     click.secho(f"Connect with: redis-cli -h localhost -p {local_port}", fg="cyan")
+
+    if dry_run:
+        click.echo()
+        click.secho("[dry-run] Would start SSM tunnel:", fg="yellow")
+        click.secho(f"  Instance: {instance_id}", fg="yellow")
+        click.secho(f"  Remote:   {redis_host}:{redis_port}", fg="yellow")
+        click.secho(f"  Local:    localhost:{local_port}", fg="yellow")
+        return
+
     click.echo("Press Ctrl+C to stop.\n")
 
     _start_tunnel(instance_id, redis_host, redis_port, local_port, profile, region)
@@ -313,19 +398,27 @@ def redis(environment, local_port, profile):
 @click.argument("environment", required=False, type=ENVIRONMENT)
 @click.option("--local-port", "-p", default=15672, help="Local port.", show_default=True)
 @click.option("--profile", default=None, help="AWS profile.")
-def rabbitmq(environment, local_port, profile):
+@click.option("--region", default=None, help="AWS region (overrides config).")
+@click.option("--dry-run", is_flag=True, help="Show what would happen without executing.")
+def rabbitmq(environment, local_port, profile, region, dry_run):
     """Connect to RabbitMQ Management UI.
 
     \b
     Examples:
       heyamara connect rabbitmq dev
+      heyamara connect rabbitmq dev --dry-run
 
     Then open in browser:
       https://localhost:15672
     """
     if not environment:
         environment = select("Select environment:", ENVS)
-    profile, region = _resolve_profile(profile)
+    profile, region = _resolve_profile(profile, region)
+
+    if not dry_run and not check_port_free(local_port):
+        click.secho(f"Port {local_port} is already in use. Use -p to choose another.", fg="red")
+        raise SystemExit(1)
+
     require_aws_session(profile)
 
     instance_id = _find_eks_node(environment, profile, region)
@@ -333,6 +426,15 @@ def rabbitmq(environment, local_port, profile):
 
     click.secho(f"Tunneling localhost:{local_port} -> {mq_host}:{mq_port}", fg="green")
     click.secho(f"Open in browser: https://localhost:{local_port}", fg="cyan")
+
+    if dry_run:
+        click.echo()
+        click.secho("[dry-run] Would start SSM tunnel:", fg="yellow")
+        click.secho(f"  Instance: {instance_id}", fg="yellow")
+        click.secho(f"  Remote:   {mq_host}:{mq_port}", fg="yellow")
+        click.secho(f"  Local:    localhost:{local_port}", fg="yellow")
+        return
+
     click.echo("Press Ctrl+C to stop.\n")
 
     _start_tunnel(instance_id, mq_host, mq_port, local_port, profile, region)
