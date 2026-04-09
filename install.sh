@@ -4,11 +4,22 @@
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/Hey-Amara/cli/main/install.sh | bash
+#
+# Install a specific version:
+#   curl -fsSL ... | bash -s -- v1.4.0
 # =============================================================================
 set -euo pipefail
 
 REPO="Hey-Amara/cli"
-GIT_URL="git+https://github.com/${REPO}.git"
+VERSION="${1:-}"
+
+if [ -n "$VERSION" ]; then
+    GIT_URL="git+https://github.com/${REPO}.git@${VERSION}"
+    info_version="$VERSION"
+else
+    GIT_URL="git+https://github.com/${REPO}.git"
+    info_version="latest"
+fi
 
 info()  { echo "[heyamara] $*"; }
 error() { echo "[heyamara] ERROR: $*" >&2; exit 1; }
@@ -21,14 +32,16 @@ if ! command -v python3 &>/dev/null; then
 fi
 
 # Prefer pipx for isolated install, fallback to pip
+info "Installing heyamara-cli ($info_version)..."
+
 if command -v pipx &>/dev/null; then
-    info "Installing with pipx..."
+    info "Using pipx..."
     pipx install "$GIT_URL" --force
 elif command -v pip3 &>/dev/null; then
-    info "Installing with pip3..."
+    info "Using pip3..."
     pip3 install "$GIT_URL" --quiet
 elif python3 -m pip --version &>/dev/null 2>&1; then
-    info "Installing with pip..."
+    info "Using pip..."
     python3 -m pip install "$GIT_URL" --quiet
 else
     error "pip or pipx is required. Install one:
