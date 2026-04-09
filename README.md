@@ -1,285 +1,338 @@
-# HeyAmara CLI
+# heyamara
 
-Developer CLI for Hey Amara infrastructure — setup, environment management, cluster access, and service connectivity.
+Internal developer CLI for Hey Amara. Cluster access, log search, DB/Redis/RabbitMQ tunneling, and environment management.
 
-## Installation
-
-### Prerequisites
-- Python 3.9+
-- pip or pipx
-
-### One-line install
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Hey-Amara/cli/main/install.sh | bash
+```
+heyamara search production ats-backend --since 1h --grep "error" --json
+heyamara logs dev ai-backend --grep timeout --since 5m
+heyamara connect db production --iam -u power_user
 ```
 
-### Or install manually
+## Install
 
 ```bash
-# From git
 pip install git+https://github.com/Hey-Amara/cli.git
-
-# From release tarball
-pipx install https://github.com/Hey-Amara/cli/releases/latest/download/heyamara_cli-1.0.0.tar.gz
-
 ```
 
-### Upgrade
+Or with pipx (isolated environment):
+
+```bash
+pipx install git+https://github.com/Hey-Amara/cli.git
+```
+
+After installing, run the first-time setup:
+
+```bash
+heyamara setup                        # Install required tools (kubectl, k9s, helm, etc.)
+heyamara config set aws_profile       # Pick your AWS SSO profile
+heyamara config set grafana_token     # Paste your Grafana service account token
+heyamara login                        # Authenticate via AWS SSO
+heyamara cluster dev                  # Connect kubectl to dev cluster
+```
+
+Update to latest:
 
 ```bash
 heyamara update
 ```
 
-### Enable Shell Completions
+Shell completions (zsh, bash, fish):
 
 ```bash
 heyamara completions
 ```
-
-Supports zsh, bash, fish, and PowerShell. Auto-detects your shell.
-
----
-
-## Quick Start
-
-```bash
-# 1. Install required tools (kubectl, k9s, helm, etc.)
-heyamara setup
-
-# 2. Set your AWS profile
-heyamara config set aws_profile
-
-# 3. Pull environment variables for a service
-heyamara env pull ats-backend
-
-# 4. Connect to the dev cluster
-heyamara cluster dev
-```
-
-All commands support **interactive mode** — run without arguments to get dropdown selectors.
-
----
 
 ## Commands
 
-### `heyamara setup`
+All commands support **interactive mode** — run without arguments to get dropdown selectors.
 
-Install or check all required developer tools (aws-cli, kubectl, k9s, helm, helmfile, sops, yq, jq).
+### Log Search (Loki)
 
-```bash
-heyamara setup          # Install missing tools (macOS via Homebrew)
-heyamara setup --check  # Only check what's installed
-```
-
-### `heyamara login`
-
-Login to AWS via SSO. This is also triggered automatically when any command detects an expired session.
+Search historical logs across all environments via Loki. Supports time ranges, text/regex search, level filtering, and JSON pretty-printing.
 
 ```bash
-heyamara login
-heyamara login --profile myprofile
+heyamara search dev ats-backend --since 1h
+heyamara search production ats-backend --grep "Request error" --level error
+heyamara search staging distributed-queue-broker --since 30m --json
+heyamara search dev ai-backend --between 2026-04-01 2026-04-02
+heyamara search production ats-backend --follow          # Tail mode (polls Loki)
+heyamara search dev ats-backend --since 1h --raw         # Show LogQL query
 ```
 
-### `heyamara config`
+| Flag | Description |
+|------|-------------|
+| `--since 1h` | Relative time window (5m, 1h, 2d) |
+| `--after` / `--before` | Absolute time range (ISO 8601) |
+| `--between START END` | Time range shortcut |
+| `--grep` / `-g` | Text or regex filter (server-side LogQL) |
+| `--level` | Filter by level: error, warn, info, debug, trace |
+| `--limit` / `-n` | Max entries (default: 100) |
+| `--json` | Pretty-print JSON entries with syntax highlighting |
+| `--follow` / `-f` | Tail mode — poll for new entries |
+| `--raw` | Show the LogQL query being executed |
 
-Manage CLI settings stored in `~/.heyamara/config.json`.
+### Live Logs (kubectl)
+
+Tail live pod logs with time filtering, text search, and JSON-aware grep.
 
 ```bash
-heyamara config get                        # Show all settings
-heyamara config get aws_profile            # Show one setting
-
-heyamara config set                        # Interactive — pick setting + value
-heyamara config set aws_profile            # Dropdown of available AWS profiles
-heyamara config set aws_profile myprofile  # Direct set
-heyamara config set aws_region us-east-1   # Change region
+heyamara logs dev ats-backend                              # Tail + follow
+heyamara logs dev ats-backend --since 5m --no-follow       # Last 5 minutes
+heyamara logs dev ats-backend --grep ERROR --no-follow     # Search for ERROR
+heyamara logs dev ats-backend --grep "timeout" --json      # Full JSON blocks matching "timeout"
+heyamara logs dev ats-backend --previous                   # Logs from crashed container
+heyamara logs dev ats-backend -t --prefix                  # Timestamps + pod names
+heyamara logs dev ats-backend -c api-gateway               # Specific container
 ```
 
-**Available settings:**
+| Flag | Description |
+|------|-------------|
+| `--since` | Relative time (5m, 1h, 2d) |
+| `--after` / `--before` / `--between` | Absolute time range |
+| `--grep` / `-g` | Regex filter (client-side) |
+| `--grep-context N` | Lines of context around matches |
+| `--json` | JSON-aware grep — matches full JSON blocks |
+| `--timestamps` / `-t` | Show timestamps |
+| `--container` / `-c` | Target specific container |
+| `--previous` | Logs from previous (crashed) container |
+| `--prefix` | Prefix lines with pod name |
+
+### Cluster & Pods
+
+```bash
+heyamara status dev                    # Pod statuses
+heyamara status production -w          # Wide output (node, IP)
+heyamara events dev                    # Kubernetes events
+heyamara events dev --warnings-only    # Only warnings
+heyamara events dev -w                 # Watch mode
+heyamara top dev                       # CPU/memory usage
+heyamara top dev ats-backend --sort memory
+heyamara shell dev ats-backend         # Exec into a pod
+heyamara cluster dev                   # Configure kubectl + open k9s
+heyamara restart dev ats-backend       # Rolling restart (with confirmation)
+heyamara rollout dev ats-backend       # Rollout status
+heyamara rollout dev ats-backend --history
+```
+
+### Service Connectivity
+
+Connect to AWS infrastructure via SSM tunnel through EKS worker nodes. No bastion needed. Endpoints are auto-discovered.
+
+```bash
+# PostgreSQL (RDS)
+heyamara connect db dev                           # Forward localhost:5432 -> RDS
+heyamara connect db production --iam              # With IAM auth token
+heyamara connect db production --iam -u power_user -p 5433
+heyamara connect db dev --db-name other_db        # Override database name
+heyamara connect db dev --dry-run                 # Show details without connecting
+
+# Redis (ElastiCache)
+heyamara connect redis dev                        # Forward localhost:6379 -> Redis
+
+# RabbitMQ
+heyamara connect rabbitmq dev                     # Forward localhost:15672 -> RabbitMQ UI
+```
+
+With `--iam`, the DATABASE_URL is automatically copied to your clipboard.
+
+| Flag | Description |
+|------|-------------|
+| `-p` / `--local-port` | Custom local port |
+| `--profile` | Override AWS profile |
+| `--region` | Override AWS region |
+| `--iam` | Generate IAM auth token (db only) |
+| `-u` / `--db-user` | Database user for IAM auth (default: developer) |
+| `--db-name` | Override database name |
+| `--dry-run` | Show what would happen without connecting |
+| `--no-copy` | Don't copy DATABASE_URL to clipboard |
+
+### Environment Variables
+
+```bash
+heyamara env pull ats-backend dev              # Download .env from SSM
+heyamara env pull ats-backend dev -o .env      # Custom output path
+heyamara env pull-all dev                      # Download all service .env files
+heyamara env show ats-backend production       # Print without saving
+```
+
+### Auth & Diagnostics
+
+```bash
+heyamara whoami                        # Show AWS identity, profile, region, role
+heyamara switch amara-prod             # Quick profile switch
+heyamara switch                        # Interactive profile picker
+heyamara doctor                        # Check tools, AWS session, kubectl, Grafana/Loki
+heyamara login                         # AWS SSO login
+heyamara login --profile amara-prod
+```
+
+### Configuration
+
+```bash
+heyamara config get                    # Show all settings (token masked)
+heyamara config set                    # Interactive setting picker
+heyamara config set aws_profile        # Pick from available AWS profiles
+heyamara config set grafana_token      # Masked input for Grafana token
+```
+
+Config file: `~/.heyamara/config.json`
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `aws_profile` | `dev` | AWS CLI profile to use |
+| `aws_profile` | `dev` | AWS SSO profile |
 | `aws_region` | `ap-southeast-2` | AWS region |
+| `grafana_url` | `https://grafana.heyamara.com` | Grafana base URL |
+| `grafana_token` | (empty) | Grafana service account token (Viewer role) |
 
----
-
-## Environment Management
-
-### `heyamara env pull`
-
-Download a service's `.env` file from AWS SSM Parameter Store.
+### Other
 
 ```bash
-heyamara env pull                              # Interactive — select service + env
-heyamara env pull ats-backend                  # Interactive env selection
-heyamara env pull ats-backend dev              # Direct
-heyamara env pull ats-backend dev -o .env      # Custom output path
+heyamara version                       # Show version
+heyamara update                        # Update to latest release
+heyamara update --check                # Just check for updates
+heyamara docs                          # Full command reference (paged)
+heyamara help logs                     # Help for a specific command
+heyamara completions                   # Install shell completions
 ```
 
-### `heyamara env pull-all`
+## Services
 
-Download `.env` files for all services at once.
+| Service | Dev | Staging | Production |
+|---------|-----|---------|------------|
+| ats-backend | yes | yes | yes |
+| ats-frontend | yes | yes | yes |
+| ae-backend | yes | -- | -- |
+| ai-backend | yes | -- | yes |
+| memory-service | yes | yes | yes |
+| profile-service | yes | -- | -- |
+| distributed-queue-broker | yes | yes | yes |
+| meeting-bot | yes | -- | yes |
+
+Multi-container services (ai-backend, meeting-bot) use the `--container` / `-c` flag or the interactive picker to select a specific component.
+
+## Architecture
+
+```
+Developer Machine              AWS
++--------------+              +----------------------------------+
+|              |    SSM       |  EKS Worker Node                 |
+| localhost:   | ============>|  (SSM Agent) --> RDS      :5432  |
+|  5432/6379/  |   tunnel     |              --> Redis    :6379  |
+|  15672       |              |              --> RabbitMQ :443   |
++--------------+              +----------------------------------+
+
++--------------+              +----------------------------------+
+|              |    HTTPS     |  Grafana (grafana.heyamara.com)  |
+| heyamara     | ----------->|  --> Loki (log search)            |
+|  search      |   API       |  --> Prometheus (metrics)         |
++--------------+              +----------------------------------+
+```
+
+- SSM tunnels use EKS worker nodes — no bastion, no SSH keys
+- Log search queries Loki via the Grafana API proxy
+- All environments (dev, staging, production) feed into Loki
+
+## Environments
+
+| Name | Cluster | Namespace |
+|------|---------|-----------|
+| dev | heyamara-dev-cluster | dev |
+| staging | heyamara-production-cluster | staging |
+| production | heyamara-production-cluster | production |
+
+## Local Development
+
+### Setup
 
 ```bash
-heyamara env pull-all                     # Interactive — select environment
-heyamara env pull-all dev                 # Pull all dev env files
-heyamara env pull-all dev -d ./envs       # Custom output directory
+git clone https://github.com/Hey-Amara/cli.git
+cd cli
+
+# Install in editable mode (changes take effect immediately)
+pip install -e .
+
+# Verify
+heyamara version
 ```
 
-### `heyamara env show`
+### Project Structure
 
-View environment variables without saving to a file.
+```
+src/heyamara_cli/
+  main.py              # CLI root, command registration, help categories
+  config.py            # Static config (clusters, services) + user config
+  helpers.py           # Subprocess runner, AWS session, port check, IAM detection
+  loki.py              # Loki HTTP client, LogQL builder, JSON reassembly
+  prompts.py           # InquirerPy wrappers (select, confirm)
+  completions.py       # Shell completion types (ServiceType, EnvironmentType)
+  commands/
+    cluster.py         # heyamara cluster
+    config_cmd.py      # heyamara config get/set
+    connect.py         # heyamara connect db/redis/rabbitmq
+    env.py             # heyamara env pull/pull-all/show
+    k8s.py             # heyamara logs/shell/status/events/top/restart/rollout
+    login.py           # heyamara login
+    search.py          # heyamara search
+    setup.py           # heyamara setup
+    update.py          # heyamara update
+    completions.py     # heyamara completions
+```
+
+### Dependencies
+
+Runtime (only 2):
+- `click>=8.0` — CLI framework
+- `InquirerPy>=0.3.4` — Interactive prompts
+
+Everything else uses stdlib (`urllib.request` for HTTP, `subprocess` for AWS CLI/kubectl, `socket` for port checks).
+
+### Adding a New Command
+
+1. Create `src/heyamara_cli/commands/mycommand.py`
+2. Define a Click command following existing patterns (interactive pickers, `require_tool()`, etc.)
+3. Import and register in `main.py`: `from ... import mycommand` + `cli.add_command(mycommand)`
+4. Add to `COMMAND_CATEGORIES` in `main.py` for help grouping
+
+### Adding a New Service
+
+Add the service name to the `SERVICES` list in `config.py`. If it has sub-deployments, add a `SUB_SERVICES` entry.
+
+### Adding a New Environment
+
+Add entries to `CLUSTERS`, `NAMESPACES`, and the service deployment matrix in `config.py`.
+
+### Testing Changes
 
 ```bash
-heyamara env show                         # Interactive
-heyamara env show ats-backend             # Interactive env selection
-heyamara env show ai-backend production   # Direct
+# Editable install means changes are live immediately
+heyamara --help
+heyamara -v logs dev ats-backend --since 1m --no-follow   # -v for debug output
 ```
 
-**Available services:** `ats-backend`, `ats-frontend`, `ae-backend`, `ai-backend`, `memory-service`, `profile-service`, `distributed-queue-broker`, `meeting-bot`
-
----
-
-## Cluster Access
-
-### `heyamara cluster`
-
-Configure kubectl and open k9s for a cluster.
+### Releasing
 
 ```bash
-heyamara cluster            # Interactive — select environment
-heyamara cluster dev        # Configure kubectl + open k9s for dev
-heyamara cluster production # Open k9s for production
-heyamara cluster dev --no-k9s  # Only configure kubectl, don't open k9s
+# 1. Bump version in pyproject.toml
+# 2. Commit and push to main
+# 3. Create a GitHub release tag:
+gh release create v1.5.0 --title "v1.5.0" --generate-notes
+
+# Existing users update with:
+heyamara update
 ```
-
-### `heyamara status`
-
-Show pod statuses for an environment.
-
-```bash
-heyamara status         # Interactive
-heyamara status dev     # List all pods in dev
-heyamara status dev -w  # Wide output (node, IP)
-```
-
-### `heyamara logs`
-
-Tail logs for a service.
-
-```bash
-heyamara logs                          # Interactive — select env + service
-heyamara logs dev ats-backend          # Tail last 100 lines, follow
-heyamara logs dev ats-backend -n 50    # Tail last 50 lines
-heyamara logs dev ats-backend --no-follow  # Print and exit
-```
-
-### `heyamara shell`
-
-Exec into a running pod.
-
-```bash
-heyamara shell                    # Interactive
-heyamara shell dev ats-backend    # Open shell in ats-backend pod
-```
-
----
-
-## Service Connectivity
-
-Connect to AWS infrastructure services via SSM tunnel through EKS worker nodes. **No bastion host needed.**
-
-All endpoints are auto-discovered — just specify the environment.
-
-### `heyamara connect db`
-
-Port-forward to RDS (PostgreSQL).
-
-```bash
-heyamara connect db             # Interactive — select environment
-heyamara connect db dev         # Forward localhost:5432 -> RDS
-heyamara connect db dev -p 5433 # Use custom local port
-```
-
-Then connect with your preferred client:
-```bash
-psql -h localhost -p 5432 -U <user> <database>
-```
-
-### `heyamara connect redis`
-
-Port-forward to Redis (ElastiCache).
-
-```bash
-heyamara connect redis          # Interactive
-heyamara connect redis dev      # Forward localhost:6379 -> Redis
-heyamara connect redis dev -p 6380
-```
-
-Then connect:
-```bash
-redis-cli -h localhost -p 6379
-```
-
-### `heyamara connect rabbitmq`
-
-Port-forward to RabbitMQ Management UI.
-
-```bash
-heyamara connect rabbitmq       # Interactive
-heyamara connect rabbitmq dev   # Forward localhost:15672 -> RabbitMQ
-```
-
-Then open in browser:
-```
-https://localhost:15672
-```
-
----
-
-## How Connectivity Works
-
-```
-Developer Machine          AWS VPC
-┌──────────────┐          ┌────────────────────────────────┐
-│              │   SSM    │  EKS Worker Node               │
-│ localhost:── │ ════════>│  (SSM Agent) ──> RDS :5432     │
-│  5432/6379/  │  tunnel  │               ──> Redis :6379  │
-│  15672       │          │               ──> RabbitMQ:443 │
-└──────────────┘          └────────────────────────────────┘
-```
-
-- Uses existing EKS worker nodes as tunnel targets
-- No dedicated bastion host, no SSH keys, no extra cost
-- Each developer gets an independent SSM session
-- Multiple developers can connect simultaneously
-- Sessions are encrypted end-to-end by AWS SSM
-
----
 
 ## Troubleshooting
 
-**"AWS session expired"**
-All commands auto-trigger SSO login when the session expires. If it still fails:
-```bash
-heyamara login
-```
+**"AWS session expired"** — All commands auto-trigger SSO login. If it persists: `heyamara login`
 
-**"No EKS worker nodes found"**
-Ensure kubectl is configured for the environment:
-```bash
-heyamara cluster dev --no-k9s
-```
+**"No EKS worker nodes found"** — Configure kubectl: `heyamara cluster dev --no-k9s`
 
-**"Port already in use"**
-Another tunnel is using that port. Use a custom port:
-```bash
-heyamara connect db dev -p 5433
-```
+**"Port already in use"** — Use a custom port: `heyamara connect db dev -p 5433`
 
-**Shell completions not working**
-```bash
-heyamara completions
-# Restart your terminal
-```
+**"Grafana token not configured"** — Run: `heyamara config set grafana_token`
+
+**"No log entries found"** — Check the time range. Default is 1 hour. Try `--since 6h` or `--since 1d`.
+
+**Shell completions not working** — Run `heyamara completions` and restart your terminal.
+
+**Full diagnostics** — Run `heyamara doctor` to check all tools, sessions, and connectivity.
