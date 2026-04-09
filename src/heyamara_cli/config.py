@@ -10,6 +10,8 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 DEFAULTS = {
     "aws_profile": "dev",
     "aws_region": "ap-southeast-2",
+    "grafana_url": "https://grafana.heyamara.com",
+    "grafana_token": "",
 }
 
 
