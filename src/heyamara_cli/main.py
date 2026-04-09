@@ -10,6 +10,7 @@ from heyamara_cli.commands.connect import connect
 from heyamara_cli.commands.env import env
 from heyamara_cli.commands.k8s import events, logs, restart, rollout, shell, status, top
 from heyamara_cli.commands.login import login
+from heyamara_cli.commands.search import search
 from heyamara_cli.commands.setup import setup
 from heyamara_cli.commands.update import update
 
@@ -18,7 +19,7 @@ from heyamara_cli.commands.update import update
 
 COMMAND_CATEGORIES = [
     ("Auth & Setup", ["login", "setup", "whoami", "switch", "doctor"]),
-    ("Cluster & Pods", ["cluster", "status", "shell", "logs", "events", "top", "restart", "rollout"]),
+    ("Cluster & Pods", ["cluster", "status", "shell", "logs", "search", "events", "top", "restart", "rollout"]),
     ("Infrastructure", ["connect", "env"]),
     ("Configuration", ["config", "completions", "update", "version", "help"]),
 ]
@@ -74,6 +75,9 @@ class AmaraCLI(click.Group):
                 "\n"
                 "Connect to production DB:\n"
                 "  heyamara connect db production --iam -u power_user\n"
+                "\n"
+                "Search historical logs:\n"
+                "  heyamara search dev ats-backend --since 1h --level error\n"
                 "\n"
                 "Check what's failing:\n"
                 "  heyamara events dev --warnings-only"
@@ -256,6 +260,30 @@ def doctor():
             click.echo(f"  Fix: heyamara cluster {env_name}")
 
     click.echo()
+    click.secho("=== Grafana / Loki ===", fg="cyan")
+    grafana_token = config.get("grafana_token")
+    if not grafana_token:
+        click.secho("  grafana_token  not configured", fg="yellow")
+        click.echo("  Fix: heyamara config set grafana_token")
+    else:
+        from heyamara_cli import loki as loki_client
+        grafana_url = config.get("grafana_url")
+        try:
+            if loki_client.check_connectivity(grafana_url, grafana_token):
+                click.secho("  Grafana/Loki  reachable", fg="green")
+            else:
+                click.secho("  Grafana/Loki  unexpected response", fg="yellow")
+        except loki_client.LokiError as e:
+            if e.status == 401:
+                click.secho("  Grafana/Loki  token invalid or expired", fg="red")
+                click.echo("  Fix: heyamara config set grafana_token")
+                all_ok = False
+            else:
+                click.secho(f"  Grafana/Loki  unreachable ({e})", fg="yellow")
+        except Exception:
+            click.secho("  Grafana/Loki  unreachable", fg="yellow")
+
+    click.echo()
     if all_ok:
         click.secho("All checks passed.", fg="green", bold=True)
     else:
@@ -273,6 +301,7 @@ cli.add_command(events)
 cli.add_command(top)
 cli.add_command(restart)
 cli.add_command(rollout)
+cli.add_command(search)
 cli.add_command(connect)
 cli.add_command(config_cmd)
 cli.add_command(completions)

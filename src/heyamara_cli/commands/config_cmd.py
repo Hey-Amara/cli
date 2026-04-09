@@ -70,6 +70,11 @@ def set_config(key, value):
             else:
                 click.secho("No AWS profiles found in ~/.aws/config or ~/.aws/credentials", fg="yellow")
                 value = click.prompt("Enter profile name")
+        elif key == "grafana_url":
+            current = config.get("grafana_url")
+            value = click.prompt("Grafana URL", default=current)
+        elif key == "grafana_token":
+            value = click.prompt("Grafana service account token", hide_input=True)
         else:
             value = click.prompt(f"Enter value for {key}")
 
@@ -99,5 +104,8 @@ def get_config(key):
     else:
         click.secho(f"Config file: {config.CONFIG_FILE}", fg="cyan")
         for k, v in sorted(cfg.items()):
+            display_v = ("*" * 8 + v[-4:]) if k == "grafana_token" and len(v) > 4 else v
             default = " (default)" if k in config.DEFAULTS and v == config.DEFAULTS[k] else ""
-            click.echo(f"  {k} = {v}{default}")
+            if k == "grafana_token" and not v:
+                default = " (not set)"
+            click.echo(f"  {k} = {display_v}{default}")

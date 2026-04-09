@@ -60,63 +60,120 @@ def _to_utc_dt(value: str) -> datetime:
     return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 
 
-def _stream_filtered(cmd, before_dt=None, grep_pattern=None, grep_context=0):
+def _stream_filtered(cmd, before_dt=None, grep_pattern=None, grep_context=0, json_mode=False):
     """Stream kubectl output with optional before-timestamp cutoff and grep filtering.
 
     Reads line-by-line from the subprocess stdout, applying:
     - before_dt: stop printing once a line's timestamp >= this datetime
     - grep_pattern: only print lines matching this regex (with optional context)
+    - json_mode: when True with grep, buffer JSON blocks and grep against the full block
     """
     compiled = re.compile(grep_pattern) if grep_pattern else None
     context_buf = deque(maxlen=grep_context) if grep_context > 0 else None
     pending_after = 0
     last_was_match = False
 
-    debug(f"Streaming with filters: before={before_dt}, grep={grep_pattern}, context={grep_context}")
+    debug(f"Streaming with filters: before={before_dt}, grep={grep_pattern}, context={grep_context}, json={json_mode}")
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     try:
-        for line in proc.stdout:
-            line = line.rstrip("\n")
+        if json_mode and compiled:
+            # JSON block-aware grep path
+            json_buf = []
+            brace_depth = 0
+            found_any = False
 
-            # --before: parse timestamp from line and stop if past cutoff
-            if before_dt:
-                ts_match = re.match(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[^\s]*)\s", line)
-                if ts_match:
-                    try:
-                        line_dt = datetime.fromisoformat(
-                            ts_match.group(1).replace("Z", "+00:00")
-                        )
-                        if line_dt >= before_dt:
-                            break
-                    except ValueError:
-                        pass
+            for line in proc.stdout:
+                line = line.rstrip("\n")
 
-            # --grep with optional context
-            if compiled:
-                if compiled.search(line):
-                    # Print separator between non-contiguous match groups
-                    if context_buf and not last_was_match and context_buf:
-                        click.echo("--")
-                    # Print buffered before-context
-                    if context_buf:
-                        for ctx_line in context_buf:
-                            click.echo(ctx_line)
-                        context_buf.clear()
-                    click.echo(line)
-                    pending_after = grep_context
-                    last_was_match = True
-                elif pending_after > 0:
-                    click.echo(line)
-                    pending_after -= 1
-                    last_was_match = pending_after > 0
+                # --before cutoff
+                if before_dt:
+                    ts_match = re.match(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[^\s]*)\s", line)
+                    if ts_match:
+                        try:
+                            line_dt = datetime.fromisoformat(
+                                ts_match.group(1).replace("Z", "+00:00")
+                            )
+                            if line_dt >= before_dt:
+                                break
+                        except ValueError:
+                            pass
+
+                stripped = line.strip()
+
+                if not json_buf:
+                    if stripped.startswith("{"):
+                        json_buf.append(line)
+                        brace_depth = stripped.count("{") - stripped.count("}")
+                        if brace_depth <= 0:
+                            block_text = "\n".join(json_buf)
+                            if compiled.search(block_text):
+                                if found_any:
+                                    click.echo("--")
+                                click.echo(block_text)
+                                found_any = True
+                            json_buf = []
+                            brace_depth = 0
+                    else:
+                        # Plain text line — grep directly
+                        if compiled.search(line):
+                            click.echo(line)
+                            found_any = True
                 else:
-                    if context_buf is not None:
-                        context_buf.append(line)
-                    last_was_match = False
-            else:
-                click.echo(line)
+                    json_buf.append(line)
+                    brace_depth += stripped.count("{") - stripped.count("}")
+                    if brace_depth <= 0:
+                        block_text = "\n".join(json_buf)
+                        if compiled.search(block_text):
+                            if found_any:
+                                click.echo("--")
+                            click.echo(block_text)
+                            found_any = True
+                        json_buf = []
+                        brace_depth = 0
+        else:
+            # Standard line-by-line filter path
+            for line in proc.stdout:
+                line = line.rstrip("\n")
+
+                # --before: parse timestamp from line and stop if past cutoff
+                if before_dt:
+                    ts_match = re.match(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[^\s]*)\s", line)
+                    if ts_match:
+                        try:
+                            line_dt = datetime.fromisoformat(
+                                ts_match.group(1).replace("Z", "+00:00")
+                            )
+                            if line_dt >= before_dt:
+                                break
+                        except ValueError:
+                            pass
+
+                # --grep with optional context
+                if compiled:
+                    if compiled.search(line):
+                        # Print separator between non-contiguous match groups
+                        if context_buf and not last_was_match and context_buf:
+                            click.echo("--")
+                        # Print buffered before-context
+                        if context_buf:
+                            for ctx_line in context_buf:
+                                click.echo(ctx_line)
+                            context_buf.clear()
+                        click.echo(line)
+                        pending_after = grep_context
+                        last_was_match = True
+                    elif pending_after > 0:
+                        click.echo(line)
+                        pending_after -= 1
+                        last_was_match = pending_after > 0
+                    else:
+                        if context_buf is not None:
+                            context_buf.append(line)
+                        last_was_match = False
+                else:
+                    click.echo(line)
     except KeyboardInterrupt:
         pass
     finally:
@@ -172,10 +229,11 @@ def _resolve_service(service):
 @click.option("--container", "-c", default=None, help="Target a specific container in multi-container pods.")
 @click.option("--previous/--no-previous", default=False, help="Show logs from previous (crashed) container.")
 @click.option("--prefix/--no-prefix", default=False, help="Prefix each line with the pod name.")
+@click.option("--json", "json_mode", is_flag=True, help="JSON-aware grep: match full JSON blocks, not individual lines.")
 def logs(environment, service, tail, follow,
          since, after, before, between,
          grep, grep_context,
-         timestamps, container, previous, prefix):
+         timestamps, container, previous, prefix, json_mode):
     """Tail logs for a service.
 
     \b
@@ -270,7 +328,7 @@ def logs(environment, service, tail, follow,
     # Route to filtered stream or direct run
     needs_filter = before_dt is not None or grep is not None
     if needs_filter:
-        _stream_filtered(cmd, before_dt=before_dt, grep_pattern=grep, grep_context=grep_context)
+        _stream_filtered(cmd, before_dt=before_dt, grep_pattern=grep, grep_context=grep_context, json_mode=json_mode)
     else:
         run(cmd)
 
