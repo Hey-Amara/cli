@@ -21,7 +21,7 @@ COMMAND_CATEGORIES = [
     ("Auth & Setup", ["login", "setup", "whoami", "switch", "doctor"]),
     ("Cluster & Pods", ["cluster", "status", "shell", "logs", "search", "events", "top", "restart", "rollout"]),
     ("Infrastructure", ["connect", "env"]),
-    ("Configuration", ["config", "completions", "update", "version", "help"]),
+    ("Configuration", ["config", "completions", "update", "version", "help", "docs"]),
 ]
 
 
@@ -288,6 +288,106 @@ def doctor():
         click.secho("All checks passed.", fg="green", bold=True)
     else:
         click.secho("Some checks failed. See above for fixes.", fg="yellow", bold=True)
+
+
+@cli.command()
+@click.pass_context
+def docs(ctx):
+    """Show full command reference (all commands, flags, and examples)."""
+    lines = []
+
+    ver = importlib.metadata.version("heyamara-cli")
+    lines.append(f"HEYAMARA-CLI(1)                  v{ver}                  HEYAMARA-CLI(1)")
+    lines.append("")
+    lines.append("NAME")
+    lines.append("    heyamara — Hey Amara developer CLI")
+    lines.append("")
+    lines.append("SYNOPSIS")
+    lines.append("    heyamara [-v] <command> [args] [options]")
+    lines.append("")
+    lines.append("DESCRIPTION")
+    lines.append("    Internal developer CLI for cluster access, log search, DB/Redis/RabbitMQ")
+    lines.append("    tunneling, environment management, and observability.")
+    lines.append("")
+    lines.append("GLOBAL OPTIONS")
+    lines.append("    -v, --verbose    Enable debug output for all commands.")
+    lines.append("")
+
+    for category, cmd_names in COMMAND_CATEGORIES:
+        lines.append(f"{category.upper()}")
+        lines.append("")
+        for name in cmd_names:
+            cmd = cli.get_command(ctx, name)
+            if not cmd:
+                continue
+
+            # Command header
+            short_help = cmd.get_short_help_str(limit=70)
+            lines.append(f"  heyamara {name}")
+            lines.append(f"      {short_help}")
+            lines.append("")
+
+            # Build a temp context to extract params
+            sub_ctx = click.Context(cmd, info_name=name, parent=ctx)
+
+            # Arguments
+            for param in cmd.params:
+                if isinstance(param, click.Argument):
+                    req = "" if param.required else " (optional)"
+                    lines.append(f"      {param.human_readable_name.upper()}{req}")
+
+            # Options
+            for param in cmd.params:
+                if isinstance(param, click.Option):
+                    decls = ", ".join(param.opts + param.secondary_opts)
+                    help_text = param.help or ""
+                    default = ""
+                    if param.show_default and param.default is not None and not param.is_flag:
+                        default = f" [default: {param.default}]"
+                    lines.append(f"      {decls}  {help_text}{default}")
+
+            # Examples from docstring
+            doc = cmd.help or ""
+            if "Examples:" in doc:
+                example_section = doc.split("Examples:")[1].strip()
+                lines.append("")
+                lines.append("      Examples:")
+                for ex_line in example_section.splitlines():
+                    ex_line = ex_line.strip()
+                    if ex_line:
+                        lines.append(f"        {ex_line}")
+
+            # Subcommands (for groups like 'connect', 'config', 'env')
+            if isinstance(cmd, click.MultiCommand):
+                for sub_name in cmd.list_commands(sub_ctx):
+                    sub_cmd = cmd.get_command(sub_ctx, sub_name)
+                    if sub_cmd:
+                        sub_help = sub_cmd.get_short_help_str(limit=60)
+                        lines.append(f"      {name} {sub_name}  {sub_help}")
+
+            lines.append("")
+
+    lines.append("CONFIGURATION")
+    lines.append("    Config file: ~/.heyamara/config.json")
+    lines.append("")
+    lines.append("    aws_profile      AWS SSO profile name")
+    lines.append("    aws_region       AWS region (default: ap-southeast-2)")
+    lines.append("    grafana_url      Grafana base URL")
+    lines.append("    grafana_token    Grafana service account token (Viewer role)")
+    lines.append("")
+    lines.append("ENVIRONMENTS")
+    lines.append("    dev, staging, production")
+    lines.append("")
+    lines.append("QUICK START")
+    lines.append("    1. heyamara setup              Install required tools")
+    lines.append("    2. heyamara config set          Set AWS profile + Grafana token")
+    lines.append("    3. heyamara login               Authenticate via AWS SSO")
+    lines.append("    4. heyamara cluster dev          Connect kubectl to dev cluster")
+    lines.append("    5. heyamara logs dev ats-backend  Tail live logs")
+    lines.append("    6. heyamara search dev ats-backend --since 1h  Search historical logs")
+    lines.append("")
+
+    click.echo_via_pager("\n".join(lines))
 
 
 cli.add_command(setup)
