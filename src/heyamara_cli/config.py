@@ -8,7 +8,7 @@ CONFIG_DIR = Path.home() / ".heyamara"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 DEFAULTS = {
-    "aws_profile": "dev",
+    "aws_profile": "default",
     "aws_region": "ap-southeast-2",
     "grafana_url": "https://grafana.heyamara.com",
     "grafana_token": "",
@@ -44,13 +44,11 @@ def get(key: str) -> str:
 SSM_PREFIX = "/amara"
 
 CLUSTERS = {
-    "dev": "heyamara-dev-cluster",
-    "staging": "heyamara-production-cluster",
+    "staging": "heyamara-staging-cluster",
     "production": "heyamara-production-cluster",
 }
 
 NAMESPACES = {
-    "dev": "dev",
     "staging": "staging",
     "production": "production",
 }

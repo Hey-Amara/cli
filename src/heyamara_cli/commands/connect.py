@@ -19,7 +19,6 @@ ENVS = list(NAMESPACES.keys())
 SERVICES = ["db", "redis", "rabbitmq"]
 
 DB_NAMES = {
-    "dev": "heyamara_dev",
     "staging": "heyamara_staging",
     "production": "heyamara_prod",
 }

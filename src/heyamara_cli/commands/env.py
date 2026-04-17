@@ -10,7 +10,7 @@ from heyamara_cli.config import SERVICES, SSM_PREFIX
 from heyamara_cli.helpers import require_aws_session, run
 from heyamara_cli.prompts import select
 
-ENVS = ["dev", "staging", "production"]
+ENVS = ["staging", "production"]
 
 
 def _get_ssm_param(ssm_path: str, profile: str, region: str, environment: str = ""):
