@@ -90,6 +90,11 @@ class AmaraCLI(click.Group):
 def cli(ctx, verbose):
     """Hey Amara developer CLI — cluster access, logs, tunnels, and env management."""
     _helpers.set_verbose(verbose)
+
+    # Non-blocking update check (cached, runs at most once per 24h)
+    from heyamara_cli.version_check import check_and_notify
+    check_and_notify()
+
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
 
@@ -376,15 +381,15 @@ def docs(ctx):
     lines.append("    grafana_token    Grafana service account token (Viewer role)")
     lines.append("")
     lines.append("ENVIRONMENTS")
-    lines.append("    dev, staging, production")
+    lines.append("    staging, production")
     lines.append("")
     lines.append("QUICK START")
-    lines.append("    1. heyamara setup              Install required tools")
-    lines.append("    2. heyamara config set          Set AWS profile + Grafana token")
-    lines.append("    3. heyamara login               Authenticate via AWS SSO")
-    lines.append("    4. heyamara cluster dev          Connect kubectl to dev cluster")
-    lines.append("    5. heyamara logs dev ats-backend  Tail live logs")
-    lines.append("    6. heyamara search dev ats-backend --since 1h  Search historical logs")
+    lines.append("    1. heyamara setup                Install required tools")
+    lines.append("    2. heyamara config set            Set AWS profile + Grafana token")
+    lines.append("    3. heyamara login                 Authenticate via AWS SSO")
+    lines.append("    4. heyamara cluster staging        Connect kubectl to staging cluster")
+    lines.append("    5. heyamara logs staging ats-backend  Tail live logs")
+    lines.append("    6. heyamara search staging ats-backend --since 1h  Search historical logs")
     lines.append("")
 
     click.echo_via_pager("\n".join(lines))
