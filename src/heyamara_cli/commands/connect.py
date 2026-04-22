@@ -82,11 +82,11 @@ def _start_tunnel(instance_id: str, remote_host: str, remote_port: int, local_po
 
 
 def _find_rds_endpoint(environment: str, profile: str, region: str) -> tuple[str, int]:
-    """Auto-discover the RDS endpoint for the environment."""
+    """Auto-discover the RDS cluster endpoint for the environment."""
     result = run(
         [
-            "aws", "rds", "describe-db-instances",
-            "--query", f"DBInstances[?TagList[?Key=='Environment' && Value=='{environment}']].[Endpoint.Address, Endpoint.Port] | [0]",
+            "aws", "rds", "describe-db-clusters",
+            "--query", f"DBClusters[?TagList[?Key=='Environment' && Value=='{environment}']].[Endpoint, Port] | [0]",
             "--output", "json",
             "--region", region,
             "--profile", profile,
@@ -100,9 +100,9 @@ def _find_rds_endpoint(environment: str, profile: str, region: str) -> tuple[str
         data = json.loads(result.stdout.strip())
         return data[0], int(data[1])
     except (json.JSONDecodeError, IndexError, TypeError):
-        click.secho(f"No RDS instance found for {environment}", fg="red")
+        click.secho(f"No RDS cluster found for {environment}", fg="red")
         click.secho(
-            f"  Ensure the RDS instance has an 'Environment' tag set to '{environment}'.",
+            f"  Ensure the RDS cluster has an 'Environment' tag set to '{environment}'.",
             fg="yellow",
         )
         raise SystemExit(1)
