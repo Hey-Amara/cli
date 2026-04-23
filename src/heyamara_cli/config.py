@@ -35,7 +35,26 @@ def save_user_config(config: dict) -> None:
 
 
 def get(key: str) -> str:
-    """Get a config value (user override > default)."""
+    """Get a config value.
+
+    Precedence (highest → lowest):
+      1. Matching env var (AWS_PROFILE overrides aws_profile, AWS_REGION overrides aws_region)
+      2. User config file (~/.heyamara/config.json)
+      3. Built-in default
+
+    This lets `AWS_PROFILE=poweruser heyamara db psql staging` work as expected
+    even when the user has a different default saved in the config file.
+    """
+    env_var_map = {
+        "aws_profile": "AWS_PROFILE",
+        "aws_region": "AWS_REGION",
+    }
+    env_var = env_var_map.get(key)
+    if env_var:
+        from os import environ
+        env_val = environ.get(env_var)
+        if env_val:
+            return env_val
     return load_user_config().get(key, DEFAULTS.get(key, ""))
 
 

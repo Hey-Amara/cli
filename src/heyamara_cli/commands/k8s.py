@@ -283,7 +283,9 @@ def logs(environment, service, tail, follow,
     require_tool("kubectl")
     namespace = NAMESPACES[environment]
 
-    # Check if any pods exist for this service first
+    # Check if any pods exist for this service first.
+    # We query the cluster directly so the "is X deployed" answer is live,
+    # not based on a stale hand-maintained matrix.
     check = run(
         [
             "kubectl", "get", "pods",
@@ -295,7 +297,21 @@ def logs(environment, service, tail, follow,
         capture=True,
         check=False,
     )
-    if check.returncode != 0 or not check.stdout.strip():
+    if check.returncode != 0:
+        stderr = (check.stderr or "").lower()
+        if any(s in stderr for s in ("unauthorized", "forbidden", "you must be logged in")):
+            click.secho(
+                f"kubectl is not authorized to access the {environment} cluster.",
+                fg="red",
+                bold=True,
+            )
+            click.echo("  Your SSO role may not be in the EKS access entries.")
+            click.echo(f"  Try: heyamara cluster {environment} --no-k9s   (refresh kubeconfig)")
+            click.echo("  Or ask an admin to add your role to EKS cluster access.")
+            raise SystemExit(1)
+        click.secho(f"kubectl failed: {check.stderr.strip()}", fg="red")
+        raise SystemExit(1)
+    if not check.stdout.strip():
         click.secho(f"{display_name} is not deployed in {environment}", fg="yellow")
         raise SystemExit(1)
 

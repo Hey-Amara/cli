@@ -93,9 +93,37 @@ def check_and_notify() -> None:
         if latest:
             _write_cache(latest)
 
-    if latest and latest != current:
+    if latest and _is_newer(latest, current):
         click.secho(
             f"\n  Update available: {current} → {latest}  —  run `heyamara update` to upgrade\n",
             fg="yellow",
             err=True,
         )
+
+
+def _is_newer(candidate: str, current: str) -> bool:
+    """Return True if `candidate` is strictly newer than `current`.
+
+    Uses packaging.version when available (handles pre-releases, build metadata),
+    falls back to a simple numeric tuple compare for stripped-down environments.
+    """
+    try:
+        from packaging.version import InvalidVersion, Version
+        try:
+            return Version(candidate) > Version(current)
+        except InvalidVersion:
+            pass
+    except ImportError:
+        pass
+
+    # Fallback: compare numeric segments only (1.5.0 vs 1.6.0 etc.)
+    def _segments(v: str) -> tuple:
+        parts = []
+        for p in v.split("-")[0].split("."):  # ignore pre-release suffixes
+            try:
+                parts.append(int(p))
+            except ValueError:
+                parts.append(0)
+        return tuple(parts)
+
+    return _segments(candidate) > _segments(current)

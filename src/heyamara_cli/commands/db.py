@@ -42,20 +42,25 @@ from heyamara_cli.tunnel import (
 
 ENVS = list(NAMESPACES.keys())
 
-# service name → (db name, default login user)
+# IAM-enabled login role used by humans when connecting through the CLI.
+# Service users (ats_backend, ae_backend, etc.) don't have rds_iam grants —
+# they use password auth from inside K8s. The CLI always auths as `developer`
+# unless the caller explicitly overrides with `--as <user>`.
+DEFAULT_IAM_USER = "developer"
+
+# service name → db name
 # Extend here as new services get their own databases.
-SERVICE_DBS: dict[str, tuple[str, str]] = {
-    "ats": ("ats_staging", "ats_backend"),
-    "ae": ("ae_staging", "ae_backend"),
-    "ai": ("ai_staging", "ai_backend"),
-    "memory": ("memory_staging", "memory_service"),
-    "profile": ("profile_staging", "profile_service"),
+SERVICE_DBS: dict[str, str] = {
+    "ats": "ats_staging",
+    "ae": "ae_staging",
+    "ai": "ai_staging",
+    "memory": "memory_staging",
+    "profile": "profile_staging",
 }
 
-# Production equivalents — if you ever extend these commands to production,
-# the DB naming will differ; keep this as a placeholder.
-PRODUCTION_SERVICE_DBS: dict[str, tuple[str, str]] = {
-    # Fill in once production is migrated to per-service DBs.
+# Production equivalents — fill in once production is migrated to per-service DBs.
+PRODUCTION_SERVICE_DBS: dict[str, str] = {
+    # e.g. "ats": "ats_production"
 }
 
 
@@ -64,8 +69,8 @@ PRODUCTION_SERVICE_DBS: dict[str, tuple[str, str]] = {
 # --------------------------------------------------------------------------
 
 
-def _pick_service(service: Optional[str], env: str) -> tuple[str, str]:
-    """Resolve (dbname, default_user) from a service arg or via interactive picker."""
+def _pick_service(service: Optional[str], env: str) -> str:
+    """Resolve the target database name from a service arg (or via interactive picker)."""
     mapping = PRODUCTION_SERVICE_DBS if env == "production" and PRODUCTION_SERVICE_DBS else SERVICE_DBS
     if not mapping:
         click.secho(
@@ -218,7 +223,7 @@ def db():
 @db.command("psql")
 @click.argument("environment", required=False, type=ENVIRONMENT)
 @click.argument("service", required=False)
-@click.option("--as", "db_user", default=None, help="DB user to authenticate as (default: service's owner).")
+@click.option("--as", "db_user", default=None, help="DB user to authenticate as (default: developer — the IAM-enabled read-only role).")
 @click.option("--db-name", default=None, help="Override the auto-detected database name.")
 @click.option("--local-port", "-p", default=15432, help="Local tunnel port.", show_default=True)
 @click.option("--profile", default=None, help="AWS profile.")
@@ -239,9 +244,9 @@ def psql_cmd(environment, service, db_user, db_name, local_port, profile, region
         raise SystemExit(1)
 
     env, profile, region = _resolve_env_profile_region(environment, profile, region)
-    default_db, default_user = _pick_service(service, env)
+    default_db = _pick_service(service, env)
     resolved_db = db_name or default_db
-    resolved_user = db_user or default_user
+    resolved_user = db_user or DEFAULT_IAM_USER
 
     local_port = _pick_local_port(local_port)
     caller_arn = require_aws_session(profile)
@@ -285,7 +290,7 @@ def psql_cmd(environment, service, db_user, db_name, local_port, profile, region
 @db.command("url")
 @click.argument("environment", required=False, type=ENVIRONMENT)
 @click.argument("service", required=False)
-@click.option("--as", "db_user", default=None, help="DB user to authenticate as (default: service's owner).")
+@click.option("--as", "db_user", default=None, help="DB user to authenticate as (default: developer — the IAM-enabled read-only role).")
 @click.option("--db-name", default=None, help="Override the auto-detected database name.")
 @click.option("--local-port", "-p", default=15432, help="Local tunnel port.", show_default=True)
 @click.option("--profile", default=None, help="AWS profile.")
@@ -307,9 +312,9 @@ def url_cmd(environment, service, db_user, db_name, local_port, profile, region)
       psql $DATABASE_URL
     """
     env, profile, region = _resolve_env_profile_region(environment, profile, region)
-    default_db, default_user = _pick_service(service, env)
+    default_db = _pick_service(service, env)
     resolved_db = db_name or default_db
-    resolved_user = db_user or default_user
+    resolved_user = db_user or DEFAULT_IAM_USER
 
     local_port = _pick_local_port(local_port)
     require_aws_session(profile)
@@ -360,7 +365,7 @@ def url_cmd(environment, service, db_user, db_name, local_port, profile, region)
 @db.command("run", context_settings=dict(ignore_unknown_options=True))
 @click.argument("environment", type=ENVIRONMENT)
 @click.argument("service")
-@click.option("--as", "db_user", default=None, help="DB user to authenticate as (default: service's owner).")
+@click.option("--as", "db_user", default=None, help="DB user to authenticate as (default: developer — the IAM-enabled read-only role).")
 @click.option("--db-name", default=None, help="Override the auto-detected database name.")
 @click.option("--local-port", "-p", default=15432, help="Local tunnel port.", show_default=True)
 @click.option("--profile", default=None, help="AWS profile.")
@@ -378,9 +383,9 @@ def run_cmd(environment, service, db_user, db_name, local_port, profile, region,
     \b
     Use `--` before the command so flags pass through to the child.
     """
-    default_db, default_user = _pick_service(service, environment)
+    default_db = _pick_service(service, environment)
     resolved_db = db_name or default_db
-    resolved_user = db_user or default_user
+    resolved_user = db_user or DEFAULT_IAM_USER
 
     local_port = _pick_local_port(local_port)
     require_aws_session(profile or config.get("aws_profile"))
@@ -431,7 +436,7 @@ def run_cmd(environment, service, db_user, db_name, local_port, profile, region,
 @db.command("doctor")
 @click.argument("environment", required=False, type=ENVIRONMENT)
 @click.argument("service", required=False)
-@click.option("--as", "db_user", default=None, help="DB user to test (default: service's owner).")
+@click.option("--as", "db_user", default=None, help="DB user to test (default: developer — the IAM-enabled read-only role).")
 @click.option("--profile", default=None, help="AWS profile.")
 @click.option("--region", default=None, help="AWS region.")
 def doctor(environment, service, db_user, profile, region):
@@ -451,8 +456,8 @@ def doctor(environment, service, db_user, profile, region):
     import socket as _socket
 
     env, profile, region = _resolve_env_profile_region(environment, profile, region)
-    default_db, default_user = _pick_service(service, env)
-    resolved_user = db_user or default_user
+    default_db = _pick_service(service, env)
+    resolved_user = db_user or DEFAULT_IAM_USER
 
     ok = lambda msg: click.secho(f"  ✅ {msg}", fg="green")
     warn = lambda msg: click.secho(f"  ⚠️  {msg}", fg="yellow")

@@ -72,6 +72,10 @@ def _is_access_denied(text: str) -> bool:
         "not authorized to perform",
         "An error occurred (403)",
         "Forbidden",
+        # kubectl / EKS auth errors
+        "Unauthorized",
+        "You must be logged in to the server",
+        "error: You must be logged in",
     ]
     return any(p in text for p in denied_patterns)
 
