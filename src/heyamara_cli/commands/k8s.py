@@ -286,13 +286,14 @@ def logs(environment, service, tail, follow,
     # Check if any pods exist for this service first.
     # We query the cluster directly so the "is X deployed" answer is live,
     # not based on a stale hand-maintained matrix.
+    # -o name returns an empty string cleanly when no pods match (vs. jsonpath which errors).
     check = run(
         [
             "kubectl", "get", "pods",
             "-n", namespace,
             "--context", environment,
             "-l", label_selector,
-            "-o", "jsonpath={.items[0].metadata.name}",
+            "-o", "name",
         ],
         capture=True,
         check=False,
