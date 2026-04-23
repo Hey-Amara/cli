@@ -7,6 +7,7 @@ from heyamara_cli.commands.cluster import cluster
 from heyamara_cli.commands.completions import completions
 from heyamara_cli.commands.config_cmd import config_cmd
 from heyamara_cli.commands.connect import connect
+from heyamara_cli.commands.db import db
 from heyamara_cli.commands.env import env
 from heyamara_cli.commands.k8s import events, logs, restart, rollout, shell, status, top
 from heyamara_cli.commands.login import login
@@ -20,7 +21,7 @@ from heyamara_cli.commands.update import update
 COMMAND_CATEGORIES = [
     ("Auth & Setup", ["login", "setup", "whoami", "switch", "doctor"]),
     ("Cluster & Pods", ["cluster", "status", "shell", "logs", "search", "events", "top", "restart", "rollout"]),
-    ("Infrastructure", ["connect", "env"]),
+    ("Infrastructure", ["connect", "db", "env"]),
     ("Configuration", ["config", "completions", "update", "version", "help", "docs"]),
 ]
 
@@ -408,6 +409,7 @@ cli.add_command(restart)
 cli.add_command(rollout)
 cli.add_command(search)
 cli.add_command(connect)
+cli.add_command(db)
 cli.add_command(config_cmd)
 cli.add_command(completions)
 cli.add_command(update)

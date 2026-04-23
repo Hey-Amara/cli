@@ -12,6 +12,12 @@ from heyamara_cli.completions import ENVIRONMENT
 from heyamara_cli.config import CLUSTERS, NAMESPACES
 from heyamara_cli.helpers import check_port_free, debug, detect_iam_role, require_aws_session, run
 from heyamara_cli.prompts import select
+from heyamara_cli.tunnel import (
+    CONNECT_TIMEOUT_SECONDS,
+    build_database_url,
+    generate_rds_auth_token as _generate_rds_auth_token_new,
+    preflight_rds_iam_enabled,
+)
 
 
 ENVS = list(NAMESPACES.keys())
@@ -276,6 +282,11 @@ def db(environment, local_port, profile, region, iam, db_user, db_name, no_copy,
     rds_host, rds_port = _find_rds_endpoint(environment, profile, region)
 
     if iam:
+        # Pre-flight: IAM auth must be enabled on the RDS cluster, otherwise
+        # psql would silently hang on authentication.
+        if not dry_run and not preflight_rds_iam_enabled(rds_host, environment, profile, region):
+            raise SystemExit(1)
+
         resolved_db_name = db_name or DB_NAMES.get(environment, f"heyamara_{environment}")
 
         # Show detected IAM role as a hint
@@ -290,17 +301,22 @@ def db(environment, local_port, profile, region, iam, db_user, db_name, no_copy,
         click.echo(f"Generating IAM auth token for user '{db_user}'...")
 
         if not dry_run:
-            token = _generate_rds_auth_token(rds_host, rds_port, db_user, profile, region)
-            encoded_token = urllib.parse.quote(token, safe="")
-            database_url = (
-                f"postgresql://{db_user}:{encoded_token}"
-                f"@localhost:{local_port}/{resolved_db_name}?sslmode=require"
+            token = _generate_rds_auth_token_new(rds_host, rds_port, db_user, profile, region)
+            database_url = build_database_url(
+                user=db_user,
+                password=token,
+                host="localhost",
+                port=local_port,
+                dbname=resolved_db_name,
             )
         else:
             token = "<token>"
-            database_url = (
-                f"postgresql://{db_user}:<token>"
-                f"@localhost:{local_port}/{resolved_db_name}?sslmode=require"
+            database_url = build_database_url(
+                user=db_user,
+                password="<token>",
+                host="localhost",
+                port=local_port,
+                dbname=resolved_db_name,
             )
 
         click.echo()
@@ -319,7 +335,7 @@ def db(environment, local_port, profile, region, iam, db_user, db_name, no_copy,
         click.echo(f"  PGPASSWORD='{token}' \\")
         click.echo(
             f"  psql \"host=localhost port={local_port} dbname={resolved_db_name}"
-            f" user={db_user} sslmode=require\""
+            f" user={db_user} sslmode=require connect_timeout={CONNECT_TIMEOUT_SECONDS}\""
         )
         click.echo()
 
@@ -327,6 +343,11 @@ def db(environment, local_port, profile, region, iam, db_user, db_name, no_copy,
             if _copy_to_clipboard(database_url):
                 click.secho("DATABASE_URL copied to clipboard.", fg="green")
 
+        click.secho(
+            f"Tip: connect_timeout={CONNECT_TIMEOUT_SECONDS}s is baked into the URL — "
+            f"psql will fail fast instead of hanging.",
+            fg="cyan",
+        )
         click.secho("Token expires in 15 minutes. Re-run to get a new one.", fg="yellow")
     else:
         click.secho(f"Tunneling localhost:{local_port} -> {rds_host}:{rds_port}", fg="green")
