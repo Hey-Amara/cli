@@ -58,9 +58,15 @@ SERVICE_DBS: dict[str, str] = {
     "profile": "profile_staging",
 }
 
-# Production equivalents — fill in once production is migrated to per-service DBs.
+# Production databases. Today the ATS-family services share one DB (heyamara_prod),
+# ai-backend has its own, and memory-service has its own. Extend as production is
+# migrated to per-service DBs.
 PRODUCTION_SERVICE_DBS: dict[str, str] = {
-    # e.g. "ats": "ats_production"
+    "ats":     "heyamara_prod",        # ats-backend, ats-frontend, ae-backend, profile-service all live here today
+    "ae":      "heyamara_prod",        # (alias — same DB as ats while prod isn't split)
+    "profile": "heyamara_prod",        # (alias)
+    "ai":      "ai_production",
+    "memory":  "memory_service_prod",
 }
 
 
