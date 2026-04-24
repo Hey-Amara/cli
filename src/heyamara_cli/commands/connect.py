@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import gzip
 import json
 import shutil
 import subprocess
@@ -9,7 +11,7 @@ import click
 
 from heyamara_cli import config
 from heyamara_cli.completions import ENVIRONMENT
-from heyamara_cli.config import CLUSTERS, NAMESPACES
+from heyamara_cli.config import CLUSTERS, NAMESPACES, SERVICES as APP_SERVICES, SSM_PREFIX
 from heyamara_cli.helpers import check_port_free, debug, detect_iam_role, require_aws_session, run
 from heyamara_cli.prompts import select
 from heyamara_cli.tunnel import (
@@ -242,31 +244,205 @@ def _copy_to_clipboard(text: str) -> bool:
     return False
 
 
+# ---- --env-for helpers ------------------------------------------------------
+# Support for `connect db --env-for <service>`: fetches the service's real
+# env vars from SSM (populated by amara-k8s sync-env-to-ssm workflow), rewrites
+# DATABASE_URL host to localhost so apps connect through the SSM tunnel using
+# the service account *password* (no 15-min IAM token expiry).
+
+
+def _fetch_service_env(service: str, environment: str, profile: str, region: str) -> str:
+    """Fetch + decode the SSM env blob for a service.
+
+    The sync-env-to-ssm workflow stores env files as gzip+base64 SecureString
+    parameters at /amara/<env>/<service>. Returns the decoded plaintext.
+    """
+    ssm_path = f"{SSM_PREFIX}/{environment}/{service}"
+    result = run(
+        [
+            "aws", "ssm", "get-parameter",
+            "--name", ssm_path,
+            "--with-decryption",
+            "--query", "Parameter.Value",
+            "--output", "text",
+            "--region", region,
+            "--profile", profile,
+        ],
+        capture=True,
+        check=False,
+        environment=environment,
+    )
+    if result.returncode != 0:
+        click.secho(f"Failed to fetch {ssm_path}", fg="red")
+        if "ParameterNotFound" in (result.stderr or ""):
+            click.secho(
+                "  Run the sync-env-to-ssm workflow in amara-k8s to populate SSM.",
+                fg="yellow",
+            )
+        raise SystemExit(1)
+
+    raw = result.stdout.strip()
+    try:
+        return gzip.decompress(base64.b64decode(raw)).decode("utf-8")
+    except Exception:
+        # Fallback: value was stored as plain text (pre-compression era)
+        return raw
+
+
+def _rewrite_db_url_host(url: str, new_host: str, new_port: int, db_name: str | None = None) -> str:
+    """Rewrite a postgres URL to point at new_host:new_port, preserve user:password.
+
+    Preserves the original user:password portion verbatim so an already
+    URL-encoded password (e.g. P%40ssw0rd) is not double-encoded.
+    """
+    parsed = urllib.parse.urlparse(url)
+
+    # netloc is `[userinfo@]host[:port]`. Pull userinfo straight from the
+    # original string so we don't decode+re-encode it.
+    userinfo, at, _ = parsed.netloc.rpartition("@")
+    userinfo_prefix = f"{userinfo}@" if at else ""
+
+    new_netloc = f"{userinfo_prefix}{new_host}:{new_port}"
+    path = f"/{db_name.lstrip('/')}" if db_name else parsed.path
+
+    return urllib.parse.urlunparse(parsed._replace(netloc=new_netloc, path=path))
+
+
+def _rewrite_urls_in_env(
+    env_content: str,
+    keys: set[str],
+    new_host: str,
+    new_port: int,
+    db_name: str | None = None,
+) -> tuple[str, list[str]]:
+    """Rewrite the host:port of any env var whose key is in `keys`.
+
+    Returns (new_content, list_of_rewritten_keys). Handles both `KEY=val`
+    and `export KEY=val` forms. Preserves quoting.
+    """
+    out_lines: list[str] = []
+    rewritten: list[str] = []
+
+    for line in env_content.splitlines():
+        stripped = line.lstrip()
+        body = stripped[len("export "):] if stripped.startswith("export ") else stripped
+        key = body.split("=", 1)[0] if "=" in body else ""
+
+        if key in keys:
+            prefix, _, value = line.partition("=")
+            value = value.strip().strip('"').strip("'")
+            if value:
+                out_lines.append(f"{prefix}={_rewrite_db_url_host(value, new_host, new_port, db_name)}")
+                rewritten.append(key)
+                continue
+        out_lines.append(line)
+
+    return "\n".join(out_lines), rewritten
+
+
+# URL-var key sets per service type. Kept permissive so we catch the usual
+# aliases apps use in their configs.
+DB_URL_KEYS = {"DATABASE_URL", "POSTGRES_URL", "DB_URL"}
+REDIS_URL_KEYS = {"REDIS_URL", "CACHE_URL", "CELERY_RESULT_BACKEND"}
+MQ_URL_KEYS = {"RABBITMQ_URL", "AMQP_URL", "BROKER_URL", "CELERY_BROKER_URL"}
+
+
+def _write_env_for(
+    output: str,
+    env_content: str,
+    rewritten_keys: list[str],
+    service: str,
+    local_port: int,
+    extra_hint: str | None = None,
+) -> None:
+    """Write the rewritten env file and print a status block."""
+    with open(output, "w") as f:
+        f.write(env_content)
+        if not env_content.endswith("\n"):
+            f.write("\n")
+
+    non_empty = [
+        ln for ln in env_content.splitlines()
+        if ln.strip() and not ln.lstrip().startswith("#")
+    ]
+
+    click.echo()
+    click.secho(f"✓ Wrote {output} ({len(non_empty)} vars)", fg="green")
+    if rewritten_keys:
+        click.secho(
+            f"  Rewrote to localhost:{local_port} → {', '.join(rewritten_keys)}",
+            fg="green",
+        )
+    else:
+        click.secho(
+            f"  Warning: no matching URL env vars found — file written as-is.",
+            fg="yellow",
+        )
+    if extra_hint:
+        click.secho(f"  {extra_hint}", fg="cyan")
+    click.echo()
+    click.secho("In another terminal, run your app:", fg="cyan")
+    click.echo(f"  cd {service} && <your dev command>   # reads {output}")
+    click.echo()
+
+
 @connect.command()
 @click.argument("environment", required=False, type=ENVIRONMENT)
 @click.option("--local-port", "-p", default=5432, help="Local port.", show_default=True)
 @click.option("--profile", default=None, help="AWS profile.")
 @click.option("--region", default=None, help="AWS region (overrides config).")
-@click.option("--iam", is_flag=True, help="Generate IAM auth token for passwordless login.")
+@click.option("--iam", is_flag=True, help="Generate IAM auth token for interactive use (15-min TTL).")
 @click.option("--db-user", "-u", default="developer", help="Database user for IAM auth.", show_default=True)
 @click.option("--db-name", default=None, help="Database name (overrides auto-detect).")
 @click.option("--no-copy", is_flag=True, help="Do not copy DATABASE_URL to clipboard.")
+@click.option(
+    "--env-for",
+    "env_for",
+    default=None,
+    type=click.Choice(APP_SERVICES),
+    help=(
+        "Write a .env file with the service's real credentials (service-account password, "
+        "no expiry) and open the tunnel. Use this to run apps locally against staging/production."
+    ),
+)
+@click.option(
+    "--output", "-o",
+    default=".env.local",
+    show_default=True,
+    help="Output path for --env-for.",
+)
 @click.option("--dry-run", is_flag=True, help="Show what would happen without executing.")
-def db(environment, local_port, profile, region, iam, db_user, db_name, no_copy, dry_run):
+def db(environment, local_port, profile, region, iam, db_user, db_name, no_copy, env_for, output, dry_run):
     """Connect to RDS (PostgreSQL).
 
     \b
-    Examples:
-      heyamara connect db dev
-      heyamara connect db production --iam
-      heyamara connect db production --iam -u power_user -p 5433
-      heyamara connect db production --iam --dry-run
-      heyamara connect db dev --db-name my_other_db
+    Three modes, pick what you need:
 
     \b
-    With --iam, generates an IAM auth token and prints
-    ready-to-use psql / DATABASE_URL connection strings.
+      1. Just open a tunnel (pair with `heyamara db psql` or your own tool):
+         heyamara connect db staging
+
+    \b
+      2. Interactive query session as your SSO identity (IAM token, 15-min TTL):
+         heyamara connect db staging --iam
+         heyamara connect db production --iam -u power_user
+
+    \b
+      3. Run an app locally against staging/production RDS (no expiry):
+         heyamara connect db staging --env-for ats-backend
+         # writes .env.local; keeps tunnel alive; use the service password
+         # that prod pods already use — no 15-min refresh needed.
+
+    \b
+    --iam and --env-for are mutually exclusive. Pick the mode that matches
+    what you're doing: humans querying → --iam; apps running → --env-for.
     """
+    if iam and env_for:
+        click.secho("--iam and --env-for are mutually exclusive.", fg="red")
+        click.secho("  --iam: 15-min token, for humans running psql/queries.", fg="yellow")
+        click.secho("  --env-for: service password, for apps with pooled connections.", fg="yellow")
+        raise SystemExit(1)
+
     if not environment:
         environment = select("Select environment:", ENVS)
     profile, region = _resolve_profile(profile, region)
@@ -280,6 +456,31 @@ def db(environment, local_port, profile, region, iam, db_user, db_name, no_copy,
 
     instance_id = _find_eks_node(environment, profile, region)
     rds_host, rds_port = _find_rds_endpoint(environment, profile, region)
+
+    if env_for:
+        click.echo(f"Fetching {env_for} env from SSM ({SSM_PREFIX}/{environment}/{env_for}) ...")
+        env_content = _fetch_service_env(env_for, environment, profile, region)
+        new_content, rewritten = _rewrite_urls_in_env(
+            env_content, DB_URL_KEYS, "localhost", local_port, db_name
+        )
+
+        if dry_run:
+            click.secho(f"[dry-run] Would write {output} (rewrite keys: {rewritten or 'none'})", fg="yellow")
+            click.secho(f"[dry-run] Would start SSM tunnel:", fg="yellow")
+            click.secho(f"  Instance: {instance_id}", fg="yellow")
+            click.secho(f"  Remote:   {rds_host}:{rds_port}", fg="yellow")
+            click.secho(f"  Local:    localhost:{local_port}", fg="yellow")
+            return
+
+        _write_env_for(
+            output, new_content, rewritten, env_for, local_port,
+            extra_hint="Service-account password — no 15-min expiry.",
+        )
+        click.secho(f"Tunneling localhost:{local_port} → {rds_host}:{rds_port}", fg="green")
+        click.echo("Press Ctrl+C to stop.\n")
+
+        _start_tunnel(instance_id, rds_host, rds_port, local_port, profile, region)
+        return
 
     if iam:
         # Pre-flight: IAM auth must be enabled on the RDS cluster, otherwise
@@ -372,18 +573,32 @@ def db(environment, local_port, profile, region, iam, db_user, db_name, no_copy,
 @click.option("--local-port", "-p", default=6379, help="Local port.", show_default=True)
 @click.option("--profile", default=None, help="AWS profile.")
 @click.option("--region", default=None, help="AWS region (overrides config).")
+@click.option(
+    "--env-for",
+    "env_for",
+    default=None,
+    type=click.Choice(APP_SERVICES),
+    help="Write a .env file with the service's REDIS_URL pointed at localhost and open the tunnel.",
+)
+@click.option("--output", "-o", default=".env.local", show_default=True, help="Output path for --env-for.")
 @click.option("--dry-run", is_flag=True, help="Show what would happen without executing.")
-def redis(environment, local_port, profile, region, dry_run):
+def redis(environment, local_port, profile, region, env_for, output, dry_run):
     """Connect to Redis (ElastiCache).
 
     \b
     Examples:
-      heyamara connect redis dev
-      heyamara connect redis dev -p 6380
-      heyamara connect redis dev --dry-run
+      heyamara connect redis staging
+      heyamara connect redis staging -p 6380
+      heyamara connect redis staging --env-for ats-backend
+      heyamara connect redis staging --dry-run
 
-    Then connect with:
+    \b
+    Then connect interactively:
       redis-cli -h localhost -p <local-port>
+
+    \b
+    Or run an app locally with --env-for: writes .env.local with REDIS_URL
+    rewritten to localhost, keeps the tunnel alive for the session.
     """
     if not environment:
         environment = select("Select environment:", ENVS)
@@ -397,6 +612,32 @@ def redis(environment, local_port, profile, region, dry_run):
 
     instance_id = _find_eks_node(environment, profile, region)
     redis_host, redis_port = _find_redis_endpoint(environment, profile, region)
+
+    if env_for:
+        click.echo(f"Fetching {env_for} env from SSM ({SSM_PREFIX}/{environment}/{env_for}) ...")
+        env_content = _fetch_service_env(env_for, environment, profile, region)
+        new_content, rewritten = _rewrite_urls_in_env(
+            env_content, REDIS_URL_KEYS, "localhost", local_port
+        )
+
+        if dry_run:
+            click.secho(f"[dry-run] Would write {output} (rewrite keys: {rewritten or 'none'})", fg="yellow")
+            click.secho(f"[dry-run] Would tunnel localhost:{local_port} → {redis_host}:{redis_port}", fg="yellow")
+            return
+
+        tls_hint = None
+        if redis_port == 6380 or any("rediss://" in ln for ln in env_content.splitlines()):
+            tls_hint = (
+                "Remote Redis uses TLS (rediss://). The tunnel forwards raw TCP — "
+                "your client may need to disable hostname verification against 'localhost'."
+            )
+
+        _write_env_for(output, new_content, rewritten, env_for, local_port, extra_hint=tls_hint)
+        click.secho(f"Tunneling localhost:{local_port} → {redis_host}:{redis_port}", fg="green")
+        click.echo("Press Ctrl+C to stop.\n")
+
+        _start_tunnel(instance_id, redis_host, redis_port, local_port, profile, region)
+        return
 
     click.secho(f"Tunneling localhost:{local_port} -> {redis_host}:{redis_port}", fg="green")
     click.secho(f"Connect with: redis-cli -h localhost -p {local_port}", fg="cyan")
@@ -416,24 +657,47 @@ def redis(environment, local_port, profile, region, dry_run):
 
 @connect.command()
 @click.argument("environment", required=False, type=ENVIRONMENT)
-@click.option("--local-port", "-p", default=15672, help="Local port.", show_default=True)
+@click.option("--local-port", "-p", default=None, type=int, help="Local port (default 15672 for UI, 5671 with --env-for).")
 @click.option("--profile", default=None, help="AWS profile.")
 @click.option("--region", default=None, help="AWS region (overrides config).")
+@click.option(
+    "--env-for",
+    "env_for",
+    default=None,
+    type=click.Choice(APP_SERVICES),
+    help="Write a .env file with AMQP_URL rewritten to localhost:5671 and open AMQPS tunnel instead of UI.",
+)
+@click.option("--output", "-o", default=".env.local", show_default=True, help="Output path for --env-for.")
 @click.option("--dry-run", is_flag=True, help="Show what would happen without executing.")
-def rabbitmq(environment, local_port, profile, region, dry_run):
-    """Connect to RabbitMQ Management UI.
+def rabbitmq(environment, local_port, profile, region, env_for, output, dry_run):
+    """Connect to RabbitMQ (AmazonMQ).
 
     \b
-    Examples:
-      heyamara connect rabbitmq dev
-      heyamara connect rabbitmq dev --dry-run
+    Two modes:
 
-    Then open in browser:
-      https://localhost:15672
+    \b
+      1. Management UI (default — port 15672 → remote 443):
+         heyamara connect rabbitmq staging
+         # then open https://localhost:15672 in your browser
+
+    \b
+      2. App-side AMQPS (--env-for — port 5671):
+         heyamara connect rabbitmq staging --env-for ats-backend
+         # writes .env.local with AMQP_URL/RABBITMQ_URL pointing at localhost:5671
+
+    \b
+    Heads up: remote AmazonMQ uses TLS and the broker's certificate CN won't
+    match 'localhost'. Most clients need TLS hostname verification disabled
+    for local dev. Alternatively, alias the broker hostname to 127.0.0.1
+    in /etc/hosts so the cert validates.
     """
     if not environment:
         environment = select("Select environment:", ENVS)
     profile, region = _resolve_profile(profile, region)
+
+    # Port defaults: 15672 for UI, 5671 for AMQPS.
+    if local_port is None:
+        local_port = 5671 if env_for else 15672
 
     if not dry_run and not check_port_free(local_port):
         click.secho(f"Port {local_port} is already in use. Use -p to choose another.", fg="red")
@@ -442,19 +706,48 @@ def rabbitmq(environment, local_port, profile, region, dry_run):
     require_aws_session(profile)
 
     instance_id = _find_eks_node(environment, profile, region)
-    mq_host, mq_port = _find_rabbitmq_endpoint(environment, profile, region)
+    mq_host, _mq_ui_port = _find_rabbitmq_endpoint(environment, profile, region)
+    # _find_rabbitmq_endpoint always returns (host, 443) for the UI.
+    # For --env-for we tunnel to AMQPS (5671) instead.
+    remote_port = 5671 if env_for else 443
 
-    click.secho(f"Tunneling localhost:{local_port} -> {mq_host}:{mq_port}", fg="green")
+    if env_for:
+        click.echo(f"Fetching {env_for} env from SSM ({SSM_PREFIX}/{environment}/{env_for}) ...")
+        env_content = _fetch_service_env(env_for, environment, profile, region)
+        new_content, rewritten = _rewrite_urls_in_env(
+            env_content, MQ_URL_KEYS, "localhost", local_port
+        )
+
+        if dry_run:
+            click.secho(f"[dry-run] Would write {output} (rewrite keys: {rewritten or 'none'})", fg="yellow")
+            click.secho(f"[dry-run] Would tunnel localhost:{local_port} → {mq_host}:{remote_port}", fg="yellow")
+            return
+
+        _write_env_for(
+            output, new_content, rewritten, env_for, local_port,
+            extra_hint=(
+                "TLS note: remote broker cert is bound to its real hostname, not 'localhost'. "
+                "Disable hostname verification in your client (or alias the broker hostname to "
+                "127.0.0.1 in /etc/hosts to keep verification on)."
+            ),
+        )
+        click.secho(f"Tunneling localhost:{local_port} → {mq_host}:{remote_port} (AMQPS)", fg="green")
+        click.echo("Press Ctrl+C to stop.\n")
+
+        _start_tunnel(instance_id, mq_host, remote_port, local_port, profile, region)
+        return
+
+    click.secho(f"Tunneling localhost:{local_port} -> {mq_host}:{remote_port}", fg="green")
     click.secho(f"Open in browser: https://localhost:{local_port}", fg="cyan")
 
     if dry_run:
         click.echo()
         click.secho("[dry-run] Would start SSM tunnel:", fg="yellow")
         click.secho(f"  Instance: {instance_id}", fg="yellow")
-        click.secho(f"  Remote:   {mq_host}:{mq_port}", fg="yellow")
+        click.secho(f"  Remote:   {mq_host}:{remote_port}", fg="yellow")
         click.secho(f"  Local:    localhost:{local_port}", fg="yellow")
         return
 
     click.echo("Press Ctrl+C to stop.\n")
 
-    _start_tunnel(instance_id, mq_host, mq_port, local_port, profile, region)
+    _start_tunnel(instance_id, mq_host, remote_port, local_port, profile, region)

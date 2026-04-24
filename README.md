@@ -5,9 +5,10 @@ Internal developer CLI for Hey Amara. Cluster access, log search, DB/Redis/Rabbi
 ```
 heyamara search production ats-backend --since 1h --grep "error" --json
 heyamara logs staging ai-backend --grep timeout --since 5m
-heyamara db psql staging ats                    # interactive psql, no tunnel juggling
+heyamara connect db staging --env-for ats-backend  # run a service locally against staging
+heyamara db psql staging ats                       # interactive psql, no tunnel juggling
 heyamara db run staging ats -- node scripts/seed.js
-heyamara connect db production --iam -u power_user
+heyamara connect db production --iam -u power_user # GUI tool, 15-min IAM token
 ```
 
 ## Install
@@ -116,57 +117,108 @@ heyamara rollout staging ats-backend       # Rollout status
 heyamara rollout staging ats-backend --history
 ```
 
-### Connecting to the Database
+### Connecting to AWS Infra (DB, Redis, RabbitMQ)
 
-Staging RDS and production RDS live in private subnets. You can't connect directly from your laptop — traffic has to be tunnelled through an EKS worker node.
+Staging and production RDS / ElastiCache / AmazonMQ live in private subnets. You can't connect directly from your laptop — traffic has to be tunnelled through an EKS worker node.
 
 The CLI handles all of that. **You don't need to know how SSM tunnels or IAM tokens work** — pick the command that matches your task.
 
 #### Which command do I use?
 
-| I want to… | Use |
-|---|---|
-| Open an interactive psql session | `heyamara db psql` |
-| Get a `DATABASE_URL` I can paste into a script | `heyamara db url` |
-| Run a script that needs a database | `heyamara db run` |
-| Connect a GUI tool (DBeaver, TablePlus, pgAdmin) | `heyamara connect db` (keeps tunnel open) |
-| Figure out why a connection isn't working | `heyamara db doctor` |
+| I want to… | Use | Auth | Expires? |
+|---|---|---|---|
+| Run a service locally (ats-backend, ae-backend, etc.) against staging | `heyamara connect db staging --env-for <svc>` | Service password (same as prod pods) | No |
+| Open an interactive psql session | `heyamara db psql` | IAM (your SSO identity) | 15 min |
+| Connect a GUI tool (DBeaver, TablePlus, pgAdmin) | `heyamara connect db staging --iam` | IAM | 15 min |
+| Run a one-off script that needs a DB | `heyamara db run` | IAM | Script lifetime |
+| Figure out why a connection isn't working | `heyamara db doctor` | — | — |
 
-#### The one-liners
+---
+
+#### Running a service locally against staging (the common case)
+
+You're working on `ats-backend` and you want to run it locally pointed at the staging database, redis, and rabbitmq. One command per service:
 
 ```bash
-# Open psql against the ats database. When you \q out, tunnel closes automatically.
-heyamara db psql staging ats
+# Terminal 1 — DB tunnel + writes .env.local
+heyamara connect db staging --env-for ats-backend
 
-# Run a Node script with DATABASE_URL set. Tunnel closes when script exits.
-heyamara db run staging ats -- node scripts/seed-staging.js
+# Terminal 2 — Redis tunnel (append to same .env.local)
+heyamara connect redis staging --env-for ats-backend -p 6380
 
-# Print a DATABASE_URL for use in another tool or shell.
-# (Tunnel stays alive until you close this terminal.)
-export DATABASE_URL=$(heyamara db url staging ats)
-psql $DATABASE_URL
+# Terminal 3 — RabbitMQ (AMQPS) tunnel
+heyamara connect rabbitmq staging --env-for ats-backend
+
+# Terminal 4 — run the service
+cd ats-backend
+npm run dev   # reads .env.local automatically
 ```
 
-#### What each command does, step by step
+What `--env-for` does:
 
-**`heyamara db psql staging ats`**
+1. Pulls the service's real env vars from SSM (the same ones prod pods use)
+2. Rewrites `DATABASE_URL` / `REDIS_URL` / `AMQP_URL` to `localhost:<port>`
+3. Writes everything to `.env.local`
+4. Opens the SSM tunnel and keeps it alive until you Ctrl+C
 
-1. Finds a staging EKS node to tunnel through.
-2. Opens the SSM tunnel in the background.
-3. Confirms the tunnel can actually reach RDS (so you don't hit a silent hang later).
-4. Generates a temporary IAM auth token (no password required).
-5. Opens psql against the `ats_staging` database as the `ats_backend` user.
-6. When you quit psql, it closes the tunnel for you.
+Because it uses the **service-account password** (not an IAM token), the connection **stays valid all day**. Connection pools can churn freely. No 15-minute refreshes.
 
-**`heyamara db url staging ats`**
+**Customizing the output path:** `-o .env.staging` or any path you want. Defaults to `.env.local` in your cwd.
 
-Same as `psql` steps 1–4, but instead of opening psql it prints the `DATABASE_URL` and stays running. Useful when you want to paste the URL into DBeaver, pgAdmin, or a shell variable. Press Ctrl+C to close the tunnel.
+**RabbitMQ TLS gotcha:** remote AmazonMQ uses TLS, and the broker's certificate CN won't match `localhost`. Most clients need TLS hostname verification disabled for local dev. Alternatively, alias the broker hostname to `127.0.0.1` in `/etc/hosts` so the cert validates normally.
 
-**`heyamara db run staging ats -- <command>`**
+---
 
-Same as `psql`, but instead of opening psql it runs **your command** with `DATABASE_URL` already set as an environment variable. When your command exits, the tunnel is cleaned up. This is the command you want for one-off scripts.
+#### Interactive psql (human querying)
 
-**`heyamara db doctor staging`**
+```bash
+# Opens psql against the ats database. When you \q out, tunnel closes automatically.
+heyamara db psql staging ats
+
+# Against production, as the read-only developer role
+heyamara db psql production ats --as developer
+```
+
+**Steps under the hood:**
+
+1. Finds a staging EKS node to tunnel through
+2. Opens the SSM tunnel in the background
+3. Confirms the tunnel can reach RDS (so you don't hit a silent hang later)
+4. Generates a temporary IAM auth token (no password required)
+5. Opens psql against the `ats_staging` database as your SSO identity
+6. When you quit psql, it closes the tunnel for you
+
+Session stays alive as long as psql stays open (days, if you want). Only opening a *new* connection after the 15-min token TTL requires re-running the command.
+
+---
+
+#### Persistent tunnel for GUI tools (DBeaver, TablePlus, pgAdmin)
+
+```bash
+heyamara connect db staging --iam -u developer
+```
+
+Opens a tunnel, prints a ready-to-use `DATABASE_URL`, keeps the tunnel alive in the foreground. Point your GUI at `localhost:5432` with the printed URL. Ctrl+C when done.
+
+> The token expires in 15 min. For a long-running GUI session, connect once (token is consumed at connect time) and leave the connection open. If you disconnect after 15 min and try to reconnect, re-run the command.
+
+---
+
+#### One-off scripts
+
+```bash
+heyamara db run staging ats -- node scripts/seed-staging.js
+```
+
+Sets `DATABASE_URL` in the child environment, runs your command, cleans up the tunnel on exit. Good for migrations, ad-hoc dumps, data backfills.
+
+---
+
+#### Doctor — "why isn't it working?"
+
+```bash
+heyamara db doctor staging
+```
 
 Runs 8 checks end-to-end and tells you exactly which layer is broken:
 
@@ -184,9 +236,11 @@ Runs 8 checks end-to-end and tells you exactly which layer is broken:
 
 Use this first if anything seems off.
 
+---
+
 #### Service → database mapping
 
-When you pass a service name (like `ats`), the CLI picks the right database and login user:
+When you pass a short service name (like `ats`) to `db psql/run`, the CLI picks the right database and login user:
 
 | Service arg | Database | Login user |
 |---|---|---|
@@ -198,38 +252,47 @@ When you pass a service name (like `ats`), the CLI picks the right database and 
 
 Override with `--as <user>` (e.g. `--as developer` for read-only access) or `--db-name <name>`.
 
-#### The persistent tunnel (GUI tools)
+For `--env-for`, use the **full service name** as it appears in SSM (`ats-backend`, `ai-backend`, etc.).
 
-If you want a tunnel that stays open all day so your DBeaver/TablePlus can use it, use the older command:
+---
 
-```bash
-heyamara connect db staging --iam -u developer   # keeps tunnel open until Ctrl+C
-```
-
-This prints a ready-to-use `DATABASE_URL` and keeps the tunnel alive in the foreground. Open DBeaver pointed at `localhost:5432`, do your work, Ctrl+C when done.
-
-#### Redis and RabbitMQ
+#### Management UIs
 
 ```bash
-heyamara connect redis staging            # forward localhost:6379 -> ElastiCache
-heyamara connect rabbitmq staging         # forward localhost:15672 -> RabbitMQ UI
+heyamara connect rabbitmq staging    # opens tunnel to AmazonMQ Management UI on localhost:15672
 ```
+
+Then open `https://localhost:15672` in your browser. (For AMQPS app connections, use `--env-for` instead — it tunnels port 5671 and writes the env file.)
+
+---
 
 #### Flags reference
 
 | Flag | Applies to | Description |
 |---|---|---|
-| `--as <user>` | `db psql/url/run/doctor` | Login as this DB user (default: service owner) |
-| `--db-name <name>` | `db psql/url/run` | Override auto-detected database |
-| `-p` / `--local-port` | All | Custom local port (default auto-picks a free one near 15432) |
+| `--env-for <service>` | `connect db/redis/rabbitmq` | Write `.env.local` with that service's real creds, host rewritten to localhost |
+| `-o` / `--output <path>` | `connect db/redis/rabbitmq` | Output path for `--env-for` (default: `.env.local`) |
+| `--iam` | `connect db` | Generate IAM auth token for interactive/GUI use (15-min TTL) |
+| `-u` / `--db-user` | `connect db` | Database user for IAM auth (default: `developer`) |
+| `--as <user>` | `db psql/run/doctor` | Login as this DB user (default: service owner) |
+| `--db-name <name>` | `db psql/run`, `connect db` | Override auto-detected database |
+| `-p` / `--local-port` | All | Custom local port |
 | `--profile` | All | Override AWS profile |
 | `--region` | All | Override AWS region |
-| `--iam` | `connect db` | Generate IAM auth token (default on `db *` commands) |
-| `-u` / `--db-user` | `connect db` | Database user for IAM auth |
 | `--dry-run` | `connect *` | Print what would happen, don't connect |
-| `--no-copy` | `connect db` | Don't copy URL to clipboard |
+| `--no-copy` | `connect db --iam` | Don't copy URL to clipboard |
 
-> All generated URLs include `connect_timeout=10` so clients fail in 10 seconds with a clear error instead of hanging forever.
+> `--iam` and `--env-for` are mutually exclusive — they're for different audiences. Humans querying → `--iam`. Apps running → `--env-for`.
+
+> All generated URLs include `connect_timeout=10` so clients fail fast with a clear error instead of hanging forever.
+
+#### Deprecated commands
+
+| Command | Status | Use instead |
+|---|---|---|
+| `heyamara db url` | Soft-deprecated in 1.7.0 | `heyamara connect db <env> --env-for <service>` — gives you a **non-expiring** URL via service-account password instead of a 15-min IAM token. For IAM URLs (scripting), `heyamara db run` is still supported. |
+
+`db url` still works but emits a deprecation notice. It will be removed in 2.0.
 
 ### Environment Variables
 

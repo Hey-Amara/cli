@@ -302,7 +302,13 @@ def psql_cmd(environment, service, db_user, db_name, local_port, profile, region
 @click.option("--profile", default=None, help="AWS profile.")
 @click.option("--region", default=None, help="AWS region.")
 def url_cmd(environment, service, db_user, db_name, local_port, profile, region):
-    """Print a ready-to-use DATABASE_URL and keep the tunnel alive.
+    """[DEPRECATED in 1.7.0] Print a ready-to-use DATABASE_URL and keep the tunnel alive.
+
+    \b
+    DEPRECATED: emits a 15-min IAM token, which breaks pooled apps after the
+    token expires. For running apps locally, use:
+      heyamara connect db <env> --env-for <service>
+    which gives a non-expiring URL via the service-account password.
 
     \b
     The tunnel lives as long as this command's process lives. For scripts, pipe
@@ -317,6 +323,19 @@ def url_cmd(environment, service, db_user, db_name, local_port, profile, region)
       export DATABASE_URL=$(heyamara db url staging ats)
       psql $DATABASE_URL
     """
+    click.secho(
+        "[deprecation] `heyamara db url` is deprecated in 1.7.0 and will be removed in 2.0.",
+        fg="yellow", err=True,
+    )
+    click.secho(
+        "             For running apps locally, use: `heyamara connect db <env> --env-for <service>`",
+        fg="yellow", err=True,
+    )
+    click.secho(
+        "             For one-off scripts, `heyamara db run` is still the right tool.",
+        fg="yellow", err=True,
+    )
+
     env, profile, region = _resolve_env_profile_region(environment, profile, region)
     default_db = _pick_service(service, env)
     resolved_db = db_name or default_db
