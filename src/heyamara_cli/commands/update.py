@@ -1,4 +1,5 @@
 import importlib.metadata
+import json
 import os
 import re
 import shutil
@@ -71,6 +72,52 @@ def _find_shadowing_binaries() -> list[Path]:
     return found
 
 
+def _local_install_reason() -> str:
+    """Return a short reason when the installed package points at local source."""
+    try:
+        direct_url = importlib.metadata.distribution("heyamara-cli").read_text("direct_url.json")
+    except importlib.metadata.PackageNotFoundError:
+        return ""
+
+    if not direct_url:
+        return ""
+
+    try:
+        data = json.loads(direct_url)
+    except json.JSONDecodeError:
+        return ""
+
+    url = data.get("url", "")
+    if data.get("dir_info", {}).get("editable"):
+        return f"editable install from {url}"
+    if url.startswith("file://"):
+        return f"local install from {url}"
+    return ""
+
+
+def _is_newer(candidate: str, current: str) -> bool:
+    """Return True if candidate is strictly newer than current."""
+    try:
+        from packaging.version import InvalidVersion, Version
+        try:
+            return Version(candidate) > Version(current)
+        except InvalidVersion:
+            pass
+    except ImportError:
+        pass
+
+    def segments(value: str) -> tuple[int, ...]:
+        parts = []
+        for part in value.split("-")[0].split("."):
+            try:
+                parts.append(int(part))
+            except ValueError:
+                parts.append(0)
+        return tuple(parts)
+
+    return segments(candidate) > segments(current)
+
+
 @click.command()
 @click.option("--check", is_flag=True, help="Only check for updates, don't install.")
 def update(check):
@@ -91,11 +138,30 @@ def update(check):
         click.echo(f"Check manually: https://github.com/{REPO}/releases")
         raise SystemExit(1)
 
-    if latest == current:
+    local_install = _local_install_reason()
+    latest_is_newer = _is_newer(latest, current)
+
+    if not latest_is_newer and latest != current:
+        click.secho(
+            f"Current version {current} is newer than the latest GitHub release ({latest}).",
+            fg="yellow",
+        )
+        if local_install:
+            click.echo(f"Current install is local ({local_install}); leaving it unchanged.")
+        return
+
+    if not latest_is_newer and not local_install:
         click.secho(f"Already up to date ({current}).", fg="green")
         return
 
-    click.echo(f"New version available: {latest}")
+    if not latest_is_newer:
+        click.echo(f"Latest GitHub version is {latest}.")
+        click.secho(
+            f"Current install is local ({local_install}); reinstalling the official release will replace it.",
+            fg="yellow",
+        )
+    else:
+        click.echo(f"New version available: {latest}")
 
     if check:
         click.echo("Run 'heyamara update' to install.")

@@ -22,9 +22,11 @@ from heyamara_cli.helpers import debug
 
 # ---- Constants ---------------------------------------------------------------
 
-LOKI_DATASOURCE_UID = "loki"
-LOKI_PATH = f"/api/datasources/proxy/uid/{LOKI_DATASOURCE_UID}/loki/api/v1/query_range"
-LOKI_LABELS_PATH = f"/api/datasources/proxy/uid/{LOKI_DATASOURCE_UID}/loki/api/v1/labels"
+LOKI_DATASOURCE_UIDS = {
+    "production": "loki",
+    "staging": "loki-staging",
+}
+DEFAULT_LOKI_DATASOURCE_UID = "loki-staging"
 
 FOLLOW_POLL_INTERVAL = 3  # seconds between polls
 FOLLOW_LOOKBACK_NS = 10_000_000_000  # 10s overlap in nanoseconds
@@ -60,6 +62,20 @@ class LokiError(Exception):
 # ---- HTTP client (stdlib only) -----------------------------------------------
 
 
+def resolve_datasource_uid(environment: str, datasource_uid: str | None = None) -> str:
+    """Resolve the Grafana Loki datasource UID for an environment."""
+    if datasource_uid:
+        return datasource_uid
+    return LOKI_DATASOURCE_UIDS.get(environment, DEFAULT_LOKI_DATASOURCE_UID)
+
+
+def loki_paths(datasource_uid: str) -> tuple[str, str]:
+    """Return Grafana proxy paths for a Loki datasource UID."""
+    uid = urllib.parse.quote(datasource_uid, safe="")
+    base = f"/api/datasources/proxy/uid/{uid}/loki/api/v1"
+    return f"{base}/query_range", f"{base}/labels"
+
+
 def _http_get(url: str, token: str, params: dict | None = None) -> dict:
     """GET request to Grafana with Bearer auth. Returns parsed JSON."""
     if params:
@@ -85,9 +101,14 @@ def _http_get(url: str, token: str, params: dict | None = None) -> dict:
         raise LokiError(0, str(e.reason))
 
 
-def check_connectivity(grafana_url: str, token: str) -> bool:
+def check_connectivity(
+    grafana_url: str,
+    token: str,
+    datasource_uid: str = DEFAULT_LOKI_DATASOURCE_UID,
+) -> bool:
     """Quick check that Grafana/Loki is reachable. Returns True on success."""
-    url = grafana_url.rstrip("/") + LOKI_LABELS_PATH
+    _, labels_path = loki_paths(datasource_uid)
+    url = grafana_url.rstrip("/") + labels_path
     try:
         data = _http_get(url, token)
         return data.get("status") == "success"
@@ -202,9 +223,11 @@ def query_loki(
     start_ns: int,
     end_ns: int,
     limit: int = 100,
+    datasource_uid: str = DEFAULT_LOKI_DATASOURCE_UID,
 ) -> list[dict]:
     """Query Loki and return a flat list of parsed entries sorted by time."""
-    url = grafana_url.rstrip("/") + LOKI_PATH
+    query_path, _ = loki_paths(datasource_uid)
+    url = grafana_url.rstrip("/") + query_path
     params = {
         "query": logql,
         "start": str(start_ns),
@@ -390,10 +413,19 @@ def stream_loki(
     limit: int,
     use_json: bool = False,
     raw: bool = False,
+    datasource_uid: str = DEFAULT_LOKI_DATASOURCE_UID,
 ) -> None:
     """Tail mode: poll Loki every few seconds for new entries."""
     end_ns = _now_ns()
-    entries = query_loki(grafana_url, token, logql, start_ns, end_ns, limit)
+    entries = query_loki(
+        grafana_url,
+        token,
+        logql,
+        start_ns,
+        end_ns,
+        limit,
+        datasource_uid,
+    )
     entries = reassemble_json_blocks(entries)
 
     last_ts_ns = start_ns
@@ -406,7 +438,15 @@ def stream_loki(
             time.sleep(FOLLOW_POLL_INTERVAL)
             new_start = last_ts_ns - FOLLOW_LOOKBACK_NS
             new_end = _now_ns()
-            new_entries = query_loki(grafana_url, token, logql, new_start, new_end, limit)
+            new_entries = query_loki(
+                grafana_url,
+                token,
+                logql,
+                new_start,
+                new_end,
+                limit,
+                datasource_uid,
+            )
             new_entries = reassemble_json_blocks(new_entries)
 
             for entry in new_entries:

@@ -271,23 +271,32 @@ def doctor():
     if not grafana_token:
         click.secho("  grafana_token  not configured", fg="yellow")
         click.echo("  Fix: heyamara config set grafana_token")
+        all_ok = False
     else:
         from heyamara_cli import loki as loki_client
         grafana_url = config.get("grafana_url")
-        try:
-            if loki_client.check_connectivity(grafana_url, grafana_token):
-                click.secho("  Grafana/Loki  reachable", fg="green")
-            else:
-                click.secho("  Grafana/Loki  unexpected response", fg="yellow")
-        except loki_client.LokiError as e:
-            if e.status == 401:
-                click.secho("  Grafana/Loki  token invalid or expired", fg="red")
-                click.echo("  Fix: heyamara config set grafana_token")
+        checked_uids = set()
+        for env_name, datasource_uid in loki_client.LOKI_DATASOURCE_UIDS.items():
+            if datasource_uid in checked_uids:
+                continue
+            checked_uids.add(datasource_uid)
+            label = f"  {env_name:10s} ({datasource_uid})"
+            try:
+                if loki_client.check_connectivity(grafana_url, grafana_token, datasource_uid):
+                    click.secho(f"{label} reachable", fg="green")
+                else:
+                    click.secho(f"{label} unexpected response", fg="yellow")
+                    all_ok = False
+            except loki_client.LokiError as e:
+                if e.status == 401:
+                    click.secho(f"{label} token invalid or expired", fg="red")
+                    click.echo("  Fix: heyamara config set grafana_token")
+                else:
+                    click.secho(f"{label} unreachable ({e})", fg="yellow")
                 all_ok = False
-            else:
-                click.secho(f"  Grafana/Loki  unreachable ({e})", fg="yellow")
-        except Exception:
-            click.secho("  Grafana/Loki  unreachable", fg="yellow")
+            except Exception:
+                click.secho(f"{label} unreachable", fg="yellow")
+                all_ok = False
 
     click.echo()
     if all_ok:
