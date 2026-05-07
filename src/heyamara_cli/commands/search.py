@@ -32,7 +32,22 @@ ENVS = list(NAMESPACES.keys())
 @click.option("--json", "use_json", is_flag=True, help="Pretty-print JSON entries with syntax highlighting.")
 @click.option("--raw", is_flag=True, help="Show the LogQL query being executed.")
 @click.option("--follow", "-f", is_flag=True, help="Tail mode: poll Loki for new entries.")
-def search(environment, service, since, after, before, between, grep, level, limit, use_json, raw, follow):
+@click.option("--datasource", default=None, help="Override the Grafana Loki datasource UID.")
+def search(
+    environment,
+    service,
+    since,
+    after,
+    before,
+    between,
+    grep,
+    level,
+    limit,
+    use_json,
+    raw,
+    follow,
+    datasource,
+):
     """Search historical logs via Loki.
 
     \b
@@ -74,15 +89,26 @@ def search(environment, service, since, after, before, between, grep, level, lim
         logql = loki_client.build_logql(environment, service, grep=grep, level=level)
 
     start_ns, end_ns = loki_client.parse_time_range(since, after, before, between)
+    datasource_uid = loki_client.resolve_datasource_uid(environment, datasource)
 
     if raw:
+        click.secho(f"Datasource: {datasource_uid}", fg="bright_black", err=True)
         click.secho(f"LogQL: {logql}", fg="bright_black", err=True)
 
     # Follow mode
     if follow:
         click.secho(f"Following {service} in {environment}... (Ctrl+C to stop)", fg="cyan", err=True)
         try:
-            loki_client.stream_loki(grafana_url, grafana_token, logql, start_ns, limit, use_json, raw)
+            loki_client.stream_loki(
+                grafana_url,
+                grafana_token,
+                logql,
+                start_ns,
+                limit,
+                use_json,
+                raw,
+                datasource_uid,
+            )
         except loki_client.LokiError as e:
             _handle_loki_error(e)
         return
@@ -91,13 +117,23 @@ def search(environment, service, since, after, before, between, grep, level, lim
     click.secho(f"Searching {service} in {environment}...", fg="cyan", err=True)
 
     try:
-        entries = loki_client.query_loki(grafana_url, grafana_token, logql, start_ns, end_ns, query_limit)
+        entries = loki_client.query_loki(
+            grafana_url,
+            grafana_token,
+            logql,
+            start_ns,
+            end_ns,
+            query_limit,
+            datasource_uid,
+        )
     except loki_client.LokiError as e:
         _handle_loki_error(e)
         raise SystemExit(1)
 
     if not entries:
         click.secho("No log entries found.", fg="yellow", err=True)
+        click.secho(f"Datasource: {datasource_uid}", fg="bright_black", err=True)
+        click.secho(f"LogQL: {logql}", fg="bright_black", err=True)
         return
 
     entries = loki_client.reassemble_json_blocks(entries)
@@ -108,6 +144,8 @@ def search(environment, service, since, after, before, between, grep, level, lim
         entries = [e for e in entries if pattern.search(e["raw_line"])][:limit]
         if not entries:
             click.secho("No matching entries found.", fg="yellow", err=True)
+            click.secho(f"Datasource: {datasource_uid}", fg="bright_black", err=True)
+            click.secho(f"LogQL: {logql}", fg="bright_black", err=True)
             return
 
     for entry in entries:
