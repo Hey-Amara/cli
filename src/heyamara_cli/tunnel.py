@@ -13,6 +13,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -236,6 +237,59 @@ def build_database_url(
         f"&connect_timeout={timeout}"
         f"&application_name=heyamara-cli"
     )
+
+
+def probe_iam_auth(
+    local_port: int,
+    db_user: str,
+    db_name: str,
+    token: str,
+    timeout: float = 5.0,
+) -> tuple[bool, str]:
+    """Probe RDS IAM auth via psql before handing the user a foreground tunnel.
+
+    Returns (ok, error_message). ok=True on a successful login (we exit cleanly
+    with `\\q`), ok=False with a human-readable message on auth/connection
+    failure. Skips silently and returns ok=True if psql isn't on PATH.
+
+    The point of this probe is to surface the "DB role missing rds_iam grant"
+    case — which RDS reports as a generic `password authentication failed`
+    that's easy to mistake for a wrong password or permissions bug.
+    """
+    if not shutil.which("psql"):
+        return True, ""
+
+    env = dict(os.environ)
+    env["PGPASSWORD"] = token
+    # Suppress libpq's IPv6-first ::1 attempt; SSM port-forwarding only binds
+    # 127.0.0.1 and the resulting "connection refused" line is noise.
+    try:
+        result = subprocess.run(
+            [
+                "psql",
+                "-h", "127.0.0.1",
+                "-p", str(local_port),
+                "-U", db_user,
+                "-d", db_name,
+                "-v", "ON_ERROR_STOP=1",
+                "--set", "sslmode=require",
+                "-At",
+                "-c", "SELECT 1",
+            ],
+            env=env,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"psql probe timed out after {timeout:.0f}s"
+    except OSError as exc:
+        return False, f"psql probe could not start: {exc}"
+
+    if result.returncode == 0:
+        return True, ""
+
+    stderr = (result.stderr or b"").decode(errors="replace").strip()
+    return False, stderr
 
 
 def generate_rds_auth_token(

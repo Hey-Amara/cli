@@ -18,7 +18,9 @@ from heyamara_cli.tunnel import (
     CONNECT_TIMEOUT_SECONDS,
     build_database_url,
     generate_rds_auth_token as _generate_rds_auth_token_new,
+    open_tunnel_and_probe,
     preflight_rds_iam_enabled,
+    probe_iam_auth,
 )
 
 
@@ -550,10 +552,67 @@ def db(environment, local_port, profile, region, iam, db_user, db_name, no_copy,
             fg="cyan",
         )
         click.secho("Token expires in 15 minutes. Re-run to get a new one.", fg="yellow")
-    else:
-        click.secho(f"Tunneling localhost:{local_port} -> {rds_host}:{rds_port}", fg="green")
-        click.secho(f"Connect with: psql -h localhost -p {local_port} -U <user> <database>", fg="cyan")
-        click.secho("Tip: use --iam to auto-generate an IAM auth token.", fg="yellow")
+
+        if dry_run:
+            click.echo()
+            click.secho("[dry-run] Would start SSM tunnel:", fg="yellow")
+            click.secho(f"  Instance: {instance_id}", fg="yellow")
+            click.secho(f"  Remote:   {rds_host}:{rds_port}", fg="yellow")
+            click.secho(f"  Local:    localhost:{local_port}", fg="yellow")
+            return
+
+        click.echo()
+        proc = open_tunnel_and_probe(
+            instance_id, rds_host, rds_port, local_port, profile, region
+        )
+
+        ok, err = probe_iam_auth(local_port, db_user, resolved_db_name, token)
+        if not ok:
+            click.echo()
+            click.secho(
+                "WARN: tunnel is up but IAM auth probe failed.",
+                fg="yellow", bold=True,
+            )
+            if err:
+                # Indent each line of the libpq error for readability
+                for line in err.splitlines():
+                    click.secho(f"  {line}", fg="yellow")
+            click.echo()
+            click.secho("Most common causes (in order):", fg="cyan")
+            click.secho(
+                f"  1. The DB role '{db_user}' isn't granted rds_iam. Connect as a "
+                f"superuser and run:",
+                fg="cyan",
+            )
+            click.secho(f"       GRANT rds_iam TO {db_user};", fg="bright_white")
+            click.secho(
+                f"  2. The DB role '{db_user}' doesn't exist in this cluster. "
+                f"`CREATE USER {db_user};` first.",
+                fg="cyan",
+            )
+            click.secho(
+                f"  3. Your IAM principal lacks rds-db:connect on "
+                f"dbuser:<cluster-id>/{db_user} for {environment}.",
+                fg="cyan",
+            )
+            click.echo()
+            click.secho(
+                "The tunnel is still open — fix the grant in another session and "
+                "your psql will start working.",
+                fg="cyan",
+            )
+
+        click.echo()
+        click.echo("Press Ctrl+C to stop.\n")
+        try:
+            proc.wait()
+        except KeyboardInterrupt:
+            pass
+        return
+
+    click.secho(f"Tunneling localhost:{local_port} -> {rds_host}:{rds_port}", fg="green")
+    click.secho(f"Connect with: psql -h localhost -p {local_port} -U <user> <database>", fg="cyan")
+    click.secho("Tip: use --iam to auto-generate an IAM auth token.", fg="yellow")
 
     if dry_run:
         click.echo()
