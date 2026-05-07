@@ -525,7 +525,7 @@ def db(environment, local_port, profile, region, iam, db_user, db_name, no_copy,
             click.echo(f"  export DATABASE_URL=\"{database_url}\"")
             click.echo(f"  psql -d $DATABASE_URL")
             click.echo()
-            click.echo("[dry-run] Would start SSM tunnel:", )
+            click.secho("[dry-run] Would start SSM tunnel:", fg="yellow")
             click.secho(f"  Instance: {instance_id}", fg="yellow")
             click.secho(f"  Remote:   {rds_host}:{rds_port}", fg="yellow")
             click.secho(f"  Local:    localhost:{local_port}", fg="yellow")
