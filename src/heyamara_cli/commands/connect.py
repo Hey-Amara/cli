@@ -17,6 +17,7 @@ from heyamara_cli.prompts import select
 from heyamara_cli.tunnel import (
     CONNECT_TIMEOUT_SECONDS,
     build_database_url,
+    discover_databases,
     generate_rds_auth_token as _generate_rds_auth_token_new,
     open_tunnel_and_probe,
     preflight_rds_iam_enabled,
@@ -29,7 +30,7 @@ ENVS = list(NAMESPACES.keys())
 SERVICES = ["db", "redis", "rabbitmq"]
 
 DB_NAMES = {
-    "staging": "heyamara_staging",
+    "staging": "ats_staging",
     "production": "heyamara_prod",
 }
 
@@ -490,7 +491,7 @@ def db(environment, local_port, profile, region, iam, db_user, db_name, no_copy,
         if not dry_run and not preflight_rds_iam_enabled(rds_host, environment, profile, region):
             raise SystemExit(1)
 
-        resolved_db_name = db_name or DB_NAMES.get(environment, f"heyamara_{environment}")
+        env_default_db = DB_NAMES.get(environment, f"heyamara_{environment}")
 
         # Show detected IAM role as a hint
         detected_role = detect_iam_role(caller_arn)
@@ -503,24 +504,80 @@ def db(environment, local_port, profile, region, iam, db_user, db_name, no_copy,
 
         click.echo(f"Generating IAM auth token for user '{db_user}'...")
 
-        if not dry_run:
-            token = _generate_rds_auth_token_new(rds_host, rds_port, db_user, profile, region)
-            database_url = build_database_url(
-                user=db_user,
-                password=token,
-                host="localhost",
-                port=local_port,
-                dbname=resolved_db_name,
-            )
-        else:
+        if dry_run:
+            # Dry-run can't open a tunnel or discover databases, so fall back to
+            # the env's default DB (or whatever was passed) for the printed URL.
+            resolved_db_name = db_name or env_default_db
             token = "<token>"
             database_url = build_database_url(
-                user=db_user,
-                password="<token>",
-                host="localhost",
-                port=local_port,
-                dbname=resolved_db_name,
+                user=db_user, password="<token>", host="localhost",
+                port=local_port, dbname=resolved_db_name,
             )
+            click.echo()
+            click.secho("=== Connection Details ===", fg="green")
+            click.secho(f"Remote:  {rds_host}:{rds_port}", fg="green")
+            click.secho(f"Local:   localhost:{local_port}", fg="green")
+            click.secho(f"User:    {db_user}", fg="green")
+            click.secho(f"DB:      {resolved_db_name}", fg="green")
+            click.echo()
+            click.secho("Run this in another terminal to connect:", fg="cyan")
+            click.echo()
+            click.echo(f"  export DATABASE_URL=\"{database_url}\"")
+            click.echo(f"  psql -d $DATABASE_URL")
+            click.echo()
+            click.echo("[dry-run] Would start SSM tunnel:", )
+            click.secho(f"  Instance: {instance_id}", fg="yellow")
+            click.secho(f"  Remote:   {rds_host}:{rds_port}", fg="yellow")
+            click.secho(f"  Local:    localhost:{local_port}", fg="yellow")
+            return
+
+        token = _generate_rds_auth_token_new(rds_host, rds_port, db_user, profile, region)
+
+        # Open the tunnel before resolving the DB name. We need a working
+        # connection to enumerate databases when --db-name wasn't passed.
+        click.echo()
+        proc = open_tunnel_and_probe(
+            instance_id, rds_host, rds_port, local_port, profile, region
+        )
+
+        # Resolve the database name. Order:
+        #   1. --db-name explicit (skip discovery; user knows what they want)
+        #   2. interactive picker over discovered databases
+        #   3. env default from DB_NAMES (fallback if discovery failed)
+        if db_name:
+            resolved_db_name = db_name
+        else:
+            click.echo("Discovering databases on the cluster...")
+            databases, disc_err = discover_databases(local_port, db_user, token)
+            if not databases:
+                resolved_db_name = env_default_db
+                if disc_err:
+                    click.secho(
+                        f"  Discovery failed ({disc_err}); "
+                        f"falling back to default DB '{resolved_db_name}'.",
+                        fg="yellow",
+                    )
+            elif len(databases) == 1:
+                resolved_db_name = databases[0]
+                click.secho(
+                    f"  Only one database on the cluster: {resolved_db_name}",
+                    fg="cyan",
+                )
+            else:
+                # Reorder so the env's default DB (if it exists in the list) is
+                # the first option — InquirerPy preselects the first choice.
+                ordered = list(databases)
+                if env_default_db in ordered:
+                    ordered.remove(env_default_db)
+                    ordered.insert(0, env_default_db)
+                resolved_db_name = select(
+                    f"Select database for {environment}:", ordered
+                )
+
+        database_url = build_database_url(
+            user=db_user, password=token, host="localhost",
+            port=local_port, dbname=resolved_db_name,
+        )
 
         click.echo()
         click.secho("=== Connection Details ===", fg="green")
@@ -534,7 +591,7 @@ def db(environment, local_port, profile, region, iam, db_user, db_name, no_copy,
         click.echo(f"  export DATABASE_URL=\"{database_url}\"")
         click.echo(f"  psql -d $DATABASE_URL")
         click.echo()
-        click.echo(f"  # Or without export:")
+        click.echo("  # Or without export:")
         click.echo(f"  PGPASSWORD='{token}' \\")
         click.echo(
             f"  psql \"host=localhost port={local_port} dbname={resolved_db_name}"
@@ -542,9 +599,8 @@ def db(environment, local_port, profile, region, iam, db_user, db_name, no_copy,
         )
         click.echo()
 
-        if not dry_run and not no_copy:
-            if _copy_to_clipboard(database_url):
-                click.secho("DATABASE_URL copied to clipboard.", fg="green")
+        if not no_copy and _copy_to_clipboard(database_url):
+            click.secho("DATABASE_URL copied to clipboard.", fg="green")
 
         click.secho(
             f"Tip: connect_timeout={CONNECT_TIMEOUT_SECONDS}s is baked into the URL — "
@@ -553,19 +609,6 @@ def db(environment, local_port, profile, region, iam, db_user, db_name, no_copy,
         )
         click.secho("Token expires in 15 minutes. Re-run to get a new one.", fg="yellow")
 
-        if dry_run:
-            click.echo()
-            click.secho("[dry-run] Would start SSM tunnel:", fg="yellow")
-            click.secho(f"  Instance: {instance_id}", fg="yellow")
-            click.secho(f"  Remote:   {rds_host}:{rds_port}", fg="yellow")
-            click.secho(f"  Local:    localhost:{local_port}", fg="yellow")
-            return
-
-        click.echo()
-        proc = open_tunnel_and_probe(
-            instance_id, rds_host, rds_port, local_port, profile, region
-        )
-
         ok, err = probe_iam_auth(local_port, db_user, resolved_db_name, token)
         if not ok:
             click.echo()
@@ -573,32 +616,80 @@ def db(environment, local_port, profile, region, iam, db_user, db_name, no_copy,
                 "WARN: tunnel is up but IAM auth probe failed.",
                 fg="yellow", bold=True,
             )
-            if err:
-                # Indent each line of the libpq error for readability
-                for line in err.splitlines():
-                    click.secho(f"  {line}", fg="yellow")
+            for line in str(err).splitlines():
+                click.secho(f"  {line}", fg="yellow")
             click.echo()
-            click.secho("Most common causes (in order):", fg="cyan")
-            click.secho(
-                f"  1. The DB role '{db_user}' isn't granted rds_iam. Connect as a "
-                f"superuser and run:",
-                fg="cyan",
-            )
-            click.secho(f"       GRANT rds_iam TO {db_user};", fg="bright_white")
-            click.secho(
-                f"  2. The DB role '{db_user}' doesn't exist in this cluster. "
-                f"`CREATE USER {db_user};` first.",
-                fg="cyan",
-            )
-            click.secho(
-                f"  3. Your IAM principal lacks rds-db:connect on "
-                f"dbuser:<cluster-id>/{db_user} for {environment}.",
-                fg="cyan",
-            )
+
+            category = getattr(err, "category", "unknown")
+
+            if category == "db_missing":
+                click.secho(
+                    f"The cluster doesn't have a database named '{resolved_db_name}'. "
+                    f"Either:",
+                    fg="cyan",
+                )
+                click.secho(
+                    "  - re-run without --db-name to pick from the list of "
+                    "databases that actually exist on this cluster, or",
+                    fg="cyan",
+                )
+                click.secho(
+                    f"  - as a superuser: CREATE DATABASE {resolved_db_name};",
+                    fg="cyan",
+                )
+            elif category == "role_missing":
+                click.secho(
+                    f"The cluster doesn't have a role named '{db_user}'. "
+                    f"As a superuser:",
+                    fg="cyan",
+                )
+                click.secho(
+                    f"  CREATE USER {db_user};\n"
+                    f"  GRANT rds_iam TO {db_user};",
+                    fg="bright_white",
+                )
+            elif category == "auth_failed":
+                click.secho("Most common causes (in order):", fg="cyan")
+                click.secho(
+                    f"  1. The DB role '{db_user}' isn't granted rds_iam. "
+                    f"As a superuser:",
+                    fg="cyan",
+                )
+                click.secho(f"       GRANT rds_iam TO {db_user};", fg="bright_white")
+                click.secho(
+                    f"  2. Your IAM principal lacks rds-db:connect on "
+                    f"dbuser:<cluster-id>/{db_user} for {environment}.",
+                    fg="cyan",
+                )
+            elif category == "ssl_required":
+                click.secho(
+                    "RDS rejected the connection because SSL is required. "
+                    "Connect via the URL the CLI emits (it sets sslmode=require) "
+                    "or pass sslmode=require to your client.",
+                    fg="cyan",
+                )
+            elif category == "timeout":
+                click.secho(
+                    "Probe timed out. The tunnel reports ready but the auth "
+                    "handshake didn't return in time. Re-run psql manually with "
+                    "the URL above; if it hangs, check RDS->EKS-node security "
+                    "group rules.",
+                    fg="cyan",
+                )
+            else:
+                click.secho(
+                    "Possible causes: missing rds_iam grant, missing role, "
+                    "missing rds-db:connect IAM permission, or cluster-side "
+                    "rejection. Re-run psql manually with the URL above for the "
+                    "exact libpq error.",
+                    fg="cyan",
+                )
+
             click.echo()
             click.secho(
-                "The tunnel is still open — fix the grant in another session and "
-                "your psql will start working.",
+                "The tunnel is still open — fix the cause in another session "
+                "and retry psql; you don't need to restart this command unless "
+                "the IAM token expires.",
                 fg="cyan",
             )
 
