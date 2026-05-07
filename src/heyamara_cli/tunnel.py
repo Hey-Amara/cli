@@ -239,30 +239,135 @@ def build_database_url(
     )
 
 
+class IamProbeFailure(str):
+    """Categorized failure from probe_iam_auth.
+
+    Subclassing str keeps the (ok, err) tuple shape so callers can keep
+    treating the second element as a printable message, while the .category
+    attribute lets us tailor the hint we show.
+    """
+    category: str = "unknown"
+
+    def __new__(cls, message: str, category: str = "unknown") -> "IamProbeFailure":
+        instance = super().__new__(cls, message)
+        instance.category = category
+        return instance
+
+
+def _classify_psql_error(stderr: str) -> str:
+    """Map a libpq stderr blob to a coarse failure category.
+
+    Categories:
+      auth_failed    — `password authentication failed`. Usually missing
+                       rds_iam grant or bad token.
+      db_missing     — `database "..." does not exist`.
+      role_missing   — `role "..." does not exist`.
+      ssl_required   — RDS rejected the connection because SSL is required.
+      timeout        — set by caller, not classified here.
+      unknown        — fallthrough.
+    """
+    s = stderr.lower()
+    if "password authentication failed" in s:
+        return "auth_failed"
+    if "does not exist" in s and "database" in s:
+        return "db_missing"
+    if "does not exist" in s and ("role" in s or "user" in s):
+        return "role_missing"
+    if "no pg_hba.conf entry" in s and "ssl off" in s:
+        return "ssl_required"
+    return "unknown"
+
+
+def discover_databases(
+    local_port: int,
+    db_user: str,
+    token: str,
+    timeout: float = 10.0,
+) -> tuple[list[str], str]:
+    """Enumerate user databases on the cluster via psql to the `postgres` DB.
+
+    Returns (databases, error_message). The list excludes Postgres template
+    databases and the locked `rdsadmin` system DB but keeps `postgres` itself
+    (useful for admin queries).
+
+    On any failure (psql missing, connection error, query error) returns
+    (empty list, error message). Callers should fall back gracefully.
+    """
+    if not shutil.which("psql"):
+        return [], "psql not on PATH"
+
+    env = dict(os.environ)
+    env["PGPASSWORD"] = token
+    env["PGSSLMODE"] = "require"
+    env["PGCONNECT_TIMEOUT"] = str(int(CONNECT_TIMEOUT_SECONDS))
+
+    query = (
+        "SELECT datname FROM pg_database "
+        "WHERE datistemplate = false AND datname <> 'rdsadmin' "
+        "ORDER BY datname;"
+    )
+
+    try:
+        result = subprocess.run(
+            [
+                "psql",
+                "-h", "127.0.0.1",
+                "-p", str(local_port),
+                "-U", db_user,
+                "-d", "postgres",
+                "-v", "ON_ERROR_STOP=1",
+                "-At",
+                "-c", query,
+            ],
+            env=env,
+            capture_output=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return [], f"discovery timed out after {timeout:.0f}s"
+    except OSError as exc:
+        return [], f"psql could not start: {exc}"
+
+    if result.returncode != 0:
+        return [], (result.stderr or b"").decode(errors="replace").strip()
+
+    names = [
+        line.strip()
+        for line in (result.stdout or b"").decode(errors="replace").splitlines()
+        if line.strip()
+    ]
+    return names, ""
+
+
 def probe_iam_auth(
     local_port: int,
     db_user: str,
     db_name: str,
     token: str,
-    timeout: float = 5.0,
-) -> tuple[bool, str]:
+    timeout: float = 12.0,
+) -> tuple[bool, IamProbeFailure]:
     """Probe RDS IAM auth via psql before handing the user a foreground tunnel.
 
-    Returns (ok, error_message). ok=True on a successful login (we exit cleanly
-    with `\\q`), ok=False with a human-readable message on auth/connection
-    failure. Skips silently and returns ok=True if psql isn't on PATH.
+    Returns (ok, err). On success err is empty. On failure, err is an
+    IamProbeFailure with a `.category` attribute the caller can use to
+    pick a tailored hint (e.g. `db_missing` vs `auth_failed`).
 
-    The point of this probe is to surface the "DB role missing rds_iam grant"
-    case — which RDS reports as a generic `password authentication failed`
-    that's easy to mistake for a wrong password or permissions bug.
+    Skips silently and returns ok=True if psql isn't on PATH.
     """
     if not shutil.which("psql"):
-        return True, ""
+        return True, IamProbeFailure("", "skipped")
 
     env = dict(os.environ)
     env["PGPASSWORD"] = token
-    # Suppress libpq's IPv6-first ::1 attempt; SSM port-forwarding only binds
-    # 127.0.0.1 and the resulting "connection refused" line is noise.
+    # PGSSLMODE is the env equivalent of `sslmode=require` in a connection
+    # string. RDS rejects non-SSL connections, so without this the probe
+    # silently times out at TLS negotiation instead of returning a useful
+    # libpq error.
+    env["PGSSLMODE"] = "require"
+    # Match the connect_timeout we bake into DATABASE_URL so the probe behaves
+    # the same way the user's psql will.
+    env["PGCONNECT_TIMEOUT"] = str(int(CONNECT_TIMEOUT_SECONDS))
+
     try:
         result = subprocess.run(
             [
@@ -272,7 +377,6 @@ def probe_iam_auth(
                 "-U", db_user,
                 "-d", db_name,
                 "-v", "ON_ERROR_STOP=1",
-                "--set", "sslmode=require",
                 "-At",
                 "-c", "SELECT 1",
             ],
@@ -281,15 +385,17 @@ def probe_iam_auth(
             timeout=timeout,
         )
     except subprocess.TimeoutExpired:
-        return False, f"psql probe timed out after {timeout:.0f}s"
+        return False, IamProbeFailure(
+            f"psql probe timed out after {timeout:.0f}s", "timeout",
+        )
     except OSError as exc:
-        return False, f"psql probe could not start: {exc}"
+        return False, IamProbeFailure(f"psql probe could not start: {exc}", "skipped")
 
     if result.returncode == 0:
-        return True, ""
+        return True, IamProbeFailure("", "ok")
 
     stderr = (result.stderr or b"").decode(errors="replace").strip()
-    return False, stderr
+    return False, IamProbeFailure(stderr, _classify_psql_error(stderr))
 
 
 def generate_rds_auth_token(
