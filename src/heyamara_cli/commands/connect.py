@@ -807,31 +807,37 @@ def redis(environment, local_port, profile, region, env_for, output, dry_run):
 
 @connect.command()
 @click.argument("environment", required=False, type=ENVIRONMENT)
-@click.option("--local-port", "-p", default=None, type=int, help="Local port (default 15672 for UI, 5671 with --env-for).")
+@click.option("--local-port", "-p", default=None, type=int, help="Local port (default 5671 for AMQPS, 15672 with --ui).")
 @click.option("--profile", default=None, help="AWS profile.")
 @click.option("--region", default=None, help="AWS region (overrides config).")
+@click.option("--ui", is_flag=True, help="Tunnel to RabbitMQ management console (port 443) instead of AMQPS.")
 @click.option(
     "--env-for",
     "env_for",
     default=None,
     type=click.Choice(APP_SERVICES),
-    help="Write a .env file with AMQP_URL rewritten to localhost:5671 and open AMQPS tunnel instead of UI.",
+    help="Also write a .env file with AMQP_URL rewritten to localhost:<local-port>.",
 )
 @click.option("--output", "-o", default=".env.local", show_default=True, help="Output path for --env-for.")
 @click.option("--dry-run", is_flag=True, help="Show what would happen without executing.")
-def rabbitmq(environment, local_port, profile, region, env_for, output, dry_run):
+def rabbitmq(environment, local_port, profile, region, ui, env_for, output, dry_run):
     """Connect to RabbitMQ (AmazonMQ).
 
     \b
-    Two modes:
+    Three modes:
 
     \b
-      1. Management UI (default — port 15672 → remote 443):
+      1. Plain AMQPS tunnel (default — port 5671):
          heyamara connect rabbitmq staging
+         # connect your client to amqps://<user>:<pw>@localhost:5671
+
+    \b
+      2. Management UI (--ui — port 15672 → remote 443):
+         heyamara connect rabbitmq staging --ui
          # then open https://localhost:15672 in your browser
 
     \b
-      2. App-side AMQPS (--env-for — port 5671):
+      3. AMQPS + .env.local for local app dev (--env-for):
          heyamara connect rabbitmq staging --env-for ats-backend
          # writes .env.local with AMQP_URL/RABBITMQ_URL pointing at localhost:5671
 
@@ -841,13 +847,19 @@ def rabbitmq(environment, local_port, profile, region, env_for, output, dry_run)
     for local dev. Alternatively, alias the broker hostname to 127.0.0.1
     in /etc/hosts so the cert validates.
     """
+    if ui and env_for:
+        click.secho("--ui and --env-for are mutually exclusive.", fg="red")
+        click.secho("  --ui: management console on port 443.", fg="yellow")
+        click.secho("  --env-for: AMQPS tunnel + .env file for local apps.", fg="yellow")
+        raise SystemExit(1)
+
     if not environment:
         environment = select("Select environment:", ENVS)
     profile, region = _resolve_profile(profile, region)
 
-    # Port defaults: 15672 for UI, 5671 for AMQPS.
+    # Port defaults: 5671 for AMQPS, 15672 for UI.
     if local_port is None:
-        local_port = 5671 if env_for else 15672
+        local_port = 15672 if ui else 5671
 
     if not dry_run and not check_port_free(local_port):
         click.secho(f"Port {local_port} is already in use. Use -p to choose another.", fg="red")
@@ -858,8 +870,8 @@ def rabbitmq(environment, local_port, profile, region, env_for, output, dry_run)
     instance_id = _find_eks_node(environment, profile, region)
     mq_host, _mq_ui_port = _find_rabbitmq_endpoint(environment, profile, region)
     # _find_rabbitmq_endpoint always returns (host, 443) for the UI.
-    # For --env-for we tunnel to AMQPS (5671) instead.
-    remote_port = 5671 if env_for else 443
+    # For AMQPS (default and --env-for) we tunnel to 5671 instead.
+    remote_port = 443 if ui else 5671
 
     if env_for:
         click.echo(f"Fetching {env_for} env from SSM ({SSM_PREFIX}/{environment}/{env_for}) ...")
@@ -888,7 +900,14 @@ def rabbitmq(environment, local_port, profile, region, env_for, output, dry_run)
         return
 
     click.secho(f"Tunneling localhost:{local_port} -> {mq_host}:{remote_port}", fg="green")
-    click.secho(f"Open in browser: https://localhost:{local_port}", fg="cyan")
+    if ui:
+        click.secho(f"Open in browser: https://localhost:{local_port}", fg="cyan")
+    else:
+        click.secho(
+            f"Connect with: amqps://<user>:<pw>@localhost:{local_port} "
+            f"(disable TLS hostname verification or alias {mq_host} → 127.0.0.1).",
+            fg="cyan",
+        )
 
     if dry_run:
         click.echo()
