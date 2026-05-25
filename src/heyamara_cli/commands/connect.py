@@ -4,6 +4,7 @@ import base64
 import gzip
 import json
 import shutil
+import signal
 import subprocess
 import urllib.parse
 
@@ -165,6 +166,87 @@ def _find_redis_endpoint(environment: str, profile: str, region: str) -> tuple[s
     except (json.JSONDecodeError, IndexError, TypeError):
         click.secho(f"No Redis cluster found for {environment}", fg="red")
         raise SystemExit(1)
+
+
+# ---- /etc/hosts management for the RabbitMQ UI tunnel ----------------------
+# AmazonMQ's HTTPS management endpoint uses SNI to route to the right broker.
+# When the browser opens https://localhost:15672 the SNI is "localhost" and
+# the broker's TLS front-end never responds — the page just times out.
+# Mapping the broker hostname to 127.0.0.1 in /etc/hosts fixes both the SNI
+# and the cert validation in one go.
+
+HOSTS_FILE = "/etc/hosts"
+HOSTS_MARKER = "# heyamara-cli rabbitmq-ui (auto-managed)"
+
+
+def _hosts_entry_state(hostname: str) -> str:
+    """Return 'ours', 'foreign', or 'none' for an existing /etc/hosts mapping.
+
+    - 'ours': line has our marker — safe to remove on cleanup (or orphan from a crashed run).
+    - 'foreign': user-managed entry — leave alone.
+    - 'none': not present.
+    """
+    try:
+        with open(HOSTS_FILE) as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                # Split off any trailing inline comment before tokenizing names.
+                names_part = stripped.split("#", 1)[0]
+                tokens = names_part.split()
+                if hostname in tokens[1:]:
+                    return "ours" if HOSTS_MARKER in line else "foreign"
+    except OSError:
+        pass
+    return "none"
+
+
+def _sudo_authenticate() -> bool:
+    """Prompt for sudo password (interactively) and cache creds for follow-up calls."""
+    try:
+        return subprocess.run(["sudo", "-v"], check=False).returncode == 0
+    except Exception:
+        return False
+
+
+def _add_hosts_entry(hostname: str) -> bool:
+    """Append `127.0.0.1 <hostname>` with our marker. Assumes sudo creds are cached."""
+    line = f"127.0.0.1 {hostname} {HOSTS_MARKER}\n"
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "tee", "-a", HOSTS_FILE],
+            input=line, text=True,
+            stdout=subprocess.DEVNULL,
+            check=False,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _remove_hosts_entry(hostname: str) -> bool:
+    """Remove any line carrying our marker AND the given hostname. No-op if none found."""
+    try:
+        with open(HOSTS_FILE) as f:
+            lines = f.readlines()
+    except OSError:
+        return False
+
+    new_lines = [ln for ln in lines if not (HOSTS_MARKER in ln and hostname in ln)]
+    if len(new_lines) == len(lines):
+        return True
+
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "tee", HOSTS_FILE],
+            input="".join(new_lines), text=True,
+            stdout=subprocess.DEVNULL,
+            check=False,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
 
 
 def _find_rabbitmq_endpoint(environment: str, profile: str, region: str) -> tuple[str, int]:
@@ -812,6 +894,11 @@ def redis(environment, local_port, profile, region, env_for, output, dry_run):
 @click.option("--region", default=None, help="AWS region (overrides config).")
 @click.option("--ui", is_flag=True, help="Tunnel to RabbitMQ management console (port 443) instead of AMQPS.")
 @click.option(
+    "--no-hosts",
+    is_flag=True,
+    help="Skip the auto-managed /etc/hosts entry (--ui only). You'll need to handle the TLS SNI mismatch yourself.",
+)
+@click.option(
     "--env-for",
     "env_for",
     default=None,
@@ -820,7 +907,7 @@ def redis(environment, local_port, profile, region, env_for, output, dry_run):
 )
 @click.option("--output", "-o", default=".env.local", show_default=True, help="Output path for --env-for.")
 @click.option("--dry-run", is_flag=True, help="Show what would happen without executing.")
-def rabbitmq(environment, local_port, profile, region, ui, env_for, output, dry_run):
+def rabbitmq(environment, local_port, profile, region, ui, no_hosts, env_for, output, dry_run):
     """Connect to RabbitMQ (AmazonMQ).
 
     \b
@@ -845,12 +932,17 @@ def rabbitmq(environment, local_port, profile, region, ui, env_for, output, dry_
     Heads up: remote AmazonMQ uses TLS and the broker's certificate CN won't
     match 'localhost'. Most clients need TLS hostname verification disabled
     for local dev. Alternatively, alias the broker hostname to 127.0.0.1
-    in /etc/hosts so the cert validates.
+    in /etc/hosts so the cert validates. (--ui does this automatically; pass
+    --no-hosts to opt out.)
     """
     if ui and env_for:
         click.secho("--ui and --env-for are mutually exclusive.", fg="red")
         click.secho("  --ui: management console on port 443.", fg="yellow")
         click.secho("  --env-for: AMQPS tunnel + .env file for local apps.", fg="yellow")
+        raise SystemExit(1)
+
+    if no_hosts and not ui:
+        click.secho("--no-hosts only applies with --ui.", fg="red")
         raise SystemExit(1)
 
     if not environment:
@@ -900,8 +992,60 @@ def rabbitmq(environment, local_port, profile, region, ui, env_for, output, dry_
         return
 
     click.secho(f"Tunneling localhost:{local_port} -> {mq_host}:{remote_port}", fg="green")
+
+    # --ui mode: auto-manage /etc/hosts so the browser's SNI/cert match the
+    # broker. AmazonMQ's TLS front-end routes by SNI, so https://localhost
+    # would just hang at the TLS handshake.
+    manage_hosts = ui and not no_hosts
+    hosts_owned = False  # set True if we should remove the entry on exit
+    browser_host = "localhost"
+
+    if manage_hosts:
+        state = _hosts_entry_state(mq_host)
+        if state == "foreign":
+            click.secho(
+                f"  /etc/hosts already maps {mq_host} (user-managed) — leaving it alone.",
+                fg="cyan",
+            )
+            browser_host = mq_host
+        elif state == "ours":
+            # Orphaned from a previous crashed run. Adopt it so we remove on exit.
+            click.secho(
+                f"  Reusing existing /etc/hosts entry for {mq_host} from a previous session.",
+                fg="cyan",
+            )
+            hosts_owned = True
+            browser_host = mq_host
+        else:
+            if dry_run:
+                click.secho(
+                    f"[dry-run] Would add to {HOSTS_FILE} (sudo): 127.0.0.1 {mq_host}",
+                    fg="yellow",
+                )
+                browser_host = mq_host
+            else:
+                click.secho(
+                    f"Adding {mq_host} → 127.0.0.1 to {HOSTS_FILE} (sudo required)...",
+                    fg="cyan",
+                )
+                if _sudo_authenticate() and _add_hosts_entry(mq_host):
+                    hosts_owned = True
+                    browser_host = mq_host
+                    click.secho("  Added. Will be removed on exit.", fg="green")
+                else:
+                    click.secho(
+                        "  Could not update /etc/hosts. The UI will likely time out "
+                        "because of TLS SNI mismatch.",
+                        fg="yellow",
+                    )
+                    click.secho(
+                        f"  Workaround: add manually, then re-run with --no-hosts:",
+                        fg="yellow",
+                    )
+                    click.secho(f"    127.0.0.1 {mq_host}", fg="yellow")
+
     if ui:
-        click.secho(f"Open in browser: https://localhost:{local_port}", fg="cyan")
+        click.secho(f"Open in browser: https://{browser_host}:{local_port}", fg="cyan")
     else:
         click.secho(
             f"Connect with: amqps://<user>:<pw>@localhost:{local_port} "
@@ -919,4 +1063,29 @@ def rabbitmq(environment, local_port, profile, region, ui, env_for, output, dry_
 
     click.echo("Press Ctrl+C to stop.\n")
 
-    _start_tunnel(instance_id, mq_host, remote_port, local_port, profile, region)
+    def _cleanup_hosts(*_args):
+        if hosts_owned:
+            click.secho(f"\nRemoving {HOSTS_FILE} entry for {mq_host}...", fg="cyan")
+            if not _remove_hosts_entry(mq_host):
+                click.secho(
+                    f"  Failed. Remove manually with the marker '{HOSTS_MARKER}'.",
+                    fg="yellow",
+                )
+
+    # SIGTERM doesn't normally run try/finally — wire a handler so cleanup
+    # still fires if the process is killed (e.g. shell exit, kill <pid>).
+    prev_sigterm = signal.getsignal(signal.SIGTERM)
+    def _sigterm_handler(signum, frame):
+        _cleanup_hosts()
+        # Restore previous handler and re-raise so default behavior wins.
+        signal.signal(signal.SIGTERM, prev_sigterm)
+        raise SystemExit(128 + signum)
+    if hosts_owned:
+        signal.signal(signal.SIGTERM, _sigterm_handler)
+
+    try:
+        _start_tunnel(instance_id, mq_host, remote_port, local_port, profile, region)
+    finally:
+        _cleanup_hosts()
+        if hosts_owned:
+            signal.signal(signal.SIGTERM, prev_sigterm)
