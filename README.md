@@ -303,6 +303,10 @@ heyamara env pull-all staging                  # Download all service .env files
 heyamara env show ats-backend production       # Print without saving
 ```
 
+Generated `.env` files can contain decrypted secrets. Default secret output
+paths are ignored by git, written with private POSIX permissions where
+supported, and must be regular paths rather than symlinks.
+
 ### Auth & Diagnostics
 
 ```bash
@@ -324,6 +328,10 @@ heyamara config set grafana_token      # Masked input/output for Grafana token
 ```
 
 Config file: `~/.heyamara/config.json`
+
+Secret config values such as `grafana_token` are entered through a hidden
+prompt. Passing them as command-line arguments is refused so tokens do not land
+in shell history or process listings.
 
 | Key | Default | Description |
 |-----|---------|-------------|

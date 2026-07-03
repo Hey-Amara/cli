@@ -28,5 +28,14 @@ Thumbs.db
 .coverage
 htmlcov/
 
+# Local secret-bearing CLI outputs
+.env
+.env.*
+!.env.example
+!.env.sample
+.env-files/
+*.staging.env
+*.production.env
+
 # Distribution
 *.tar.gz

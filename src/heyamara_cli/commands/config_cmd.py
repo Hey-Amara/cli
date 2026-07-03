@@ -81,6 +81,14 @@ def set_config(key, value):
         click.secho(f"Unknown key: {key}. Choose from: {', '.join(keys)}", fg="red")
         raise SystemExit(1)
 
+    if key in SECRET_KEYS and value is not None:
+        click.secho(
+            f"{key} is secret; enter it at the hidden prompt instead of passing it as an argument.",
+            fg="red",
+            err=True,
+        )
+        raise SystemExit(1)
+
     if not value:
         if key == "aws_profile":
             profiles = _list_aws_profiles()

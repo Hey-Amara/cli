@@ -48,7 +48,7 @@ class ConfigSecurityTests(unittest.TestCase):
     def test_config_set_masks_grafana_token_persists_raw_value_and_writes_private_file(self):
         token = "grafana-secret-token-123456"
 
-        result = self.runner.invoke(config_cmd, ["set", "grafana_token", token])
+        result = self.runner.invoke(config_cmd, ["set", "grafana_token"], input=f"{token}\n")
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertNotIn(token, result.output)
@@ -61,6 +61,17 @@ class ConfigSecurityTests(unittest.TestCase):
             config_file_mode = stat.S_IMODE(config.CONFIG_FILE.stat().st_mode)
             self.assertEqual(config_dir_mode, 0o700)
             self.assertEqual(config_file_mode, 0o600)
+
+    def test_config_set_rejects_positional_grafana_token_without_echoing_it(self):
+        token = "grafana-secret-token-123456"
+
+        result = self.runner.invoke(config_cmd, ["set", "grafana_token", token])
+
+        combined = self._combined_output(result)
+        self.assertEqual(result.exit_code, 1, combined)
+        self.assertIn("hidden prompt", combined)
+        self.assertNotIn(token, combined)
+        self.assertFalse(config.CONFIG_FILE.exists())
 
     def test_config_get_masks_single_grafana_token_value(self):
         token = "grafana-secret-token-abcdef"
@@ -143,7 +154,7 @@ class ConfigSecurityTests(unittest.TestCase):
         target.write_text('{"grafana_token": "safe"}\n')
         self._symlink_or_skip(target, config.CONFIG_FILE)
 
-        result = self.runner.invoke(config_cmd, ["set", "grafana_token", token])
+        result = self.runner.invoke(config_cmd, ["set", "grafana_token"], input=f"{token}\n")
 
         combined = self._combined_output(result)
         self.assertEqual(result.exit_code, 1, combined)
