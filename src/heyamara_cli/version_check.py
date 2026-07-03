@@ -5,8 +5,8 @@ from __future__ import annotations
 import importlib.metadata
 import json
 import os
-import subprocess
 import shutil
+import subprocess
 import time
 from pathlib import Path
 
@@ -18,25 +18,50 @@ CHECK_INTERVAL = 86400  # 24 hours
 REPO = "Hey-Amara/cli"
 
 
+def _normalize_cache(raw: object) -> dict:
+    """Return only well-formed cache fields; malformed cache is a cache miss."""
+    if not isinstance(raw, dict):
+        return {}
+
+    latest = raw.get("latest", "")
+    checked_at = raw.get("checked_at", 0)
+    if isinstance(checked_at, bool) or not isinstance(checked_at, (int, float)):
+        return {}
+    if not isinstance(latest, str) or not latest:
+        return {}
+
+    return {"latest": latest, "checked_at": checked_at}
+
+
 def _read_cache() -> dict:
     """Read the cached version check result."""
     try:
         if CACHE_FILE.exists():
             with open(CACHE_FILE) as f:
-                return json.load(f)
-    except (json.JSONDecodeError, OSError):
+                return _normalize_cache(json.load(f))
+    except (json.JSONDecodeError, OSError, TypeError, UnicodeDecodeError):
         pass
     return {}
 
 
 def _write_cache(latest: str) -> None:
     """Write a version check result to cache."""
+    temp_file = CACHE_FILE.with_name(f".{CACHE_FILE.name}.{os.getpid()}.tmp")
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        with open(CACHE_FILE, "w") as f:
+        with open(temp_file, "w") as f:
             json.dump({"latest": latest, "checked_at": time.time()}, f)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_file, CACHE_FILE)
     except OSError:
         pass
+    finally:
+        try:
+            temp_file.unlink()
+        except OSError:
+            pass
 
 
 def _fetch_latest_version() -> str:
