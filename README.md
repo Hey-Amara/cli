@@ -476,8 +476,10 @@ Add entries to `CLUSTERS`, `NAMESPACES`, and the service deployment matrix in `c
 
 ```bash
 # Install local package metadata/dependencies first
-python -m pip install -e .
-PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -v
+python3 -m pip install -e .
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
+
+# Pull requests run this suite on Python 3.9 and 3.12 in GitHub Actions.
 
 # Editable install means changes are live immediately
 heyamara --help
@@ -489,7 +491,8 @@ heyamara -v logs staging ats-backend --since 1m --no-follow   # -v for debug out
 ```bash
 # 1. Bump version in pyproject.toml
 # 2. Commit and push to main
-# 3. GitHub Actions validates tests/build/wheel install, then tags and creates the release
+# 3. Create a GitHub release tag:
+gh release create v1.6.0 --title "v1.6.0" --generate-notes
 
 # Existing users update with:
 heyamara update
