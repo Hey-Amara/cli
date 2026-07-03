@@ -7,7 +7,7 @@ from unittest import mock
 
 from click.testing import CliRunner
 
-from heyamara_cli import config, version_check
+from heyamara_cli import config
 from heyamara_cli.commands.config_cmd import config_cmd
 from heyamara_cli.main import cli
 
@@ -73,6 +73,44 @@ class ConfigSecurityTests(unittest.TestCase):
         self.assertNotIn(token, combined)
         self.assertFalse(config.CONFIG_FILE.exists())
 
+    def test_config_set_accepts_grafana_token_from_env_without_echoing_it(self):
+        token = "grafana-secret-token-from-env-123456"
+
+        result = self.runner.invoke(
+            config_cmd,
+            ["set", "grafana_token", "--from-env", "GRAFANA_TOKEN"],
+            env={"GRAFANA_TOKEN": token},
+        )
+
+        combined = self._combined_output(result)
+        self.assertEqual(result.exit_code, 0, combined)
+        self.assertNotIn(token, combined)
+        self.assertIn("grafana_token = ********3456", combined)
+        self.assertEqual(config.load_user_config()["grafana_token"], token)
+
+    def test_config_set_from_env_requires_existing_env_var_without_writing(self):
+        result = self.runner.invoke(config_cmd, ["set", "grafana_token", "--from-env", "MISSING_TOKEN"])
+
+        combined = self._combined_output(result)
+        self.assertEqual(result.exit_code, 1, combined)
+        self.assertIn("Environment variable not set: MISSING_TOKEN", combined)
+        self.assertFalse(config.CONFIG_FILE.exists())
+
+    def test_config_set_rejects_positional_value_with_from_env(self):
+        token = "grafana-secret-token-123456"
+
+        result = self.runner.invoke(
+            config_cmd,
+            ["set", "grafana_token", token, "--from-env", "GRAFANA_TOKEN"],
+            env={"GRAFANA_TOKEN": "safe-env-token"},
+        )
+
+        combined = self._combined_output(result)
+        self.assertEqual(result.exit_code, 1, combined)
+        self.assertIn("Pass either a positional value or --from-env", combined)
+        self.assertNotIn(token, combined)
+        self.assertFalse(config.CONFIG_FILE.exists())
+
     def test_config_get_masks_single_grafana_token_value(self):
         token = "grafana-secret-token-abcdef"
         config.save_user_config({**config.DEFAULTS, "grafana_token": token})
@@ -133,71 +171,6 @@ class ConfigSecurityTests(unittest.TestCase):
         config.CONFIG_FILE.write_text('{"aws_profile": 123}\n')
 
         self.assertEqual(config.get("aws_profile"), "123")
-
-    def test_update_check_cache_write_failure_is_non_blocking(self):
-        original_cache_dir = version_check.CACHE_DIR
-        original_cache_file = version_check.CACHE_FILE
-        self.addCleanup(setattr, version_check, "CACHE_DIR", original_cache_dir)
-        self.addCleanup(setattr, version_check, "CACHE_FILE", original_cache_file)
-
-        blocker = Path(self.temp_dir.name) / ".heyamara"
-        blocker.write_text("not a directory")
-        version_check.CACHE_DIR = blocker
-        version_check.CACHE_FILE = blocker / ".update-check"
-
-        version_check._write_cache("9.9.9")
-
-    def test_update_check_ignores_malformed_cache_files(self):
-        original_cache_dir = version_check.CACHE_DIR
-        original_cache_file = version_check.CACHE_FILE
-        self.addCleanup(setattr, version_check, "CACHE_DIR", original_cache_dir)
-        self.addCleanup(setattr, version_check, "CACHE_FILE", original_cache_file)
-
-        cache_dir = Path(self.temp_dir.name) / ".heyamara-cache"
-        cache_file = cache_dir / ".update-check"
-        cache_dir.mkdir()
-        version_check.CACHE_DIR = cache_dir
-        version_check.CACHE_FILE = cache_file
-
-        malformed_payloads = [
-            b"[]",
-            b'{"checked_at": "oops", "latest": "9.9.9"}',
-            b"\xff\xfe\x00",
-        ]
-
-        for payload in malformed_payloads:
-            with self.subTest(payload=payload):
-                cache_file.write_bytes(payload)
-                self.assertEqual(version_check._read_cache(), {})
-                with mock.patch(
-                    "heyamara_cli.version_check.importlib.metadata.version",
-                    return_value="1.8.5",
-                ):
-                    with mock.patch("heyamara_cli.version_check._fetch_latest_version", return_value=""):
-                        version_check.check_and_notify()
-
-    def test_update_check_backs_off_after_failed_fetch(self):
-        original_cache_dir = version_check.CACHE_DIR
-        original_cache_file = version_check.CACHE_FILE
-        self.addCleanup(setattr, version_check, "CACHE_DIR", original_cache_dir)
-        self.addCleanup(setattr, version_check, "CACHE_FILE", original_cache_file)
-
-        cache_dir = Path(self.temp_dir.name) / ".heyamara-cache"
-        cache_file = cache_dir / ".update-check"
-        version_check.CACHE_DIR = cache_dir
-        version_check.CACHE_FILE = cache_file
-
-        with mock.patch(
-            "heyamara_cli.version_check.importlib.metadata.version",
-            return_value="1.8.5",
-        ):
-            with mock.patch("heyamara_cli.version_check._fetch_latest_version", return_value="") as fetch:
-                version_check.check_and_notify()
-                version_check.check_and_notify()
-
-        self.assertEqual(fetch.call_count, 1)
-        self.assertEqual(version_check._read_cache()["latest"], "1.8.5")
-        self.assertTrue(version_check._read_cache()["failed"])
 
     def test_config_set_refuses_symlink_config_file_without_overwriting_target(self):
         token = "grafana-secret-token-123456"

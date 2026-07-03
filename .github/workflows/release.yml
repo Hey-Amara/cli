@@ -46,6 +46,20 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Validate package before release
+        if: steps.tagcheck.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          python3 --version
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -e .
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
+          python3 -m pip wheel . -w /tmp/heyamara-wheel
+          python3 -m venv /tmp/heyamara-smoke
+          /tmp/heyamara-smoke/bin/python -m pip install --upgrade pip
+          /tmp/heyamara-smoke/bin/python -m pip install --no-index --find-links /tmp/heyamara-wheel /tmp/heyamara-wheel/heyamara_cli-*.whl
+          /tmp/heyamara-smoke/bin/heyamara version
+
       - name: Create tag and GitHub release
         if: steps.tagcheck.outputs.exists == 'false'
         env:

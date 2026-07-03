@@ -28,7 +28,7 @@ After installing, run the first-time setup:
 ```bash
 heyamara setup                        # Install required tools (kubectl, k9s, helm, etc.)
 heyamara config set aws_profile       # Pick your AWS SSO profile
-heyamara config set grafana_token     # Paste your Grafana service account token
+heyamara config set grafana_token     # Enter token at a hidden prompt
 heyamara login                        # Authenticate via AWS SSO
 heyamara cluster staging              # Connect kubectl to staging cluster
 ```
@@ -305,7 +305,8 @@ heyamara env show ats-backend production       # Print without saving
 
 Generated `.env` files can contain decrypted secrets. Default secret output
 paths are ignored by git, written with private POSIX permissions where
-supported, and must be regular paths rather than symlinks.
+supported, and reject unsafe symlinked paths/components. Trusted platform
+aliases such as macOS `/tmp` are allowed.
 
 ### Auth & Diagnostics
 
@@ -325,13 +326,23 @@ heyamara config get                    # Show all settings (token masked)
 heyamara config set                    # Interactive setting picker
 heyamara config set aws_profile        # Pick from available AWS profiles
 heyamara config set grafana_token      # Masked input/output for Grafana token
+heyamara config set grafana_token --from-env GRAFANA_TOKEN  # Non-interactive secret input
 ```
 
 Config file: `~/.heyamara/config.json`
 
 Secret config values such as `grafana_token` are entered through a hidden
-prompt. Passing them as command-line arguments is refused so tokens do not land
-in shell history or process listings.
+prompt. For automation, pass the name of an environment variable with
+`--from-env` instead of passing the secret itself as an argument:
+
+```bash
+GRAFANA_TOKEN=... heyamara config set grafana_token --from-env GRAFANA_TOKEN
+```
+
+Passing secret values as positional command-line arguments is refused so tokens
+do not land in shell history or process listings. `heyamara config get
+grafana_token` prints a masked value; the raw token remains available to
+internal CLI commands through the config file.
 
 | Key | Default | Description |
 |-----|---------|-------------|
@@ -464,6 +475,10 @@ Add entries to `CLUSTERS`, `NAMESPACES`, and the service deployment matrix in `c
 ### Testing Changes
 
 ```bash
+# Install local package metadata/dependencies first
+python -m pip install -e .
+PYTHONDONTWRITEBYTECODE=1 python -m unittest discover -s tests -v
+
 # Editable install means changes are live immediately
 heyamara --help
 heyamara -v logs staging ats-backend --since 1m --no-follow   # -v for debug output
@@ -474,8 +489,7 @@ heyamara -v logs staging ats-backend --since 1m --no-follow   # -v for debug out
 ```bash
 # 1. Bump version in pyproject.toml
 # 2. Commit and push to main
-# 3. Create a GitHub release tag:
-gh release create v1.6.0 --title "v1.6.0" --generate-notes
+# 3. GitHub Actions validates tests/build/wheel install, then tags and creates the release
 
 # Existing users update with:
 heyamara update
