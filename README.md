@@ -466,11 +466,23 @@ heyamara -v logs staging ats-backend --since 1m --no-follow   # -v for debug out
 ```bash
 # 1. Bump version in pyproject.toml
 # 2. Commit and push to main
-# 3. Create a GitHub release tag:
-gh release create v1.6.0 --title "v1.6.0" --generate-notes
+# 3. GitHub Actions creates the vX.Y.Z tag and GitHub release
 
 # Existing users update with:
 heyamara update
+```
+
+The release workflow only runs the tag/release reconciliation when the
+`version =` line changes. If a release run pushes the tag but fails before the
+GitHub release is created, rerun the failed workflow for the same commit; it
+will reuse the existing tag after verifying it points at that commit and create
+the missing release.
+
+For manual recovery, verify the tag already exists and points at the intended
+commit, then create the release without allowing `gh` to create a tag implicitly:
+
+```bash
+gh release create v1.6.0 --title "v1.6.0" --generate-notes --verify-tag
 ```
 
 ## Troubleshooting
