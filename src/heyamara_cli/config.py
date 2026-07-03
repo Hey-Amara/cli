@@ -1,6 +1,7 @@
 import json
-import os
 from pathlib import Path
+
+from heyamara_cli.secret_files import ensure_private_dir, write_secret_text
 
 # ---- User config file -------------------------------------------------------
 
@@ -29,9 +30,8 @@ def load_user_config() -> dict:
 
 def save_user_config(config: dict) -> None:
     """Save user config to ~/.heyamara/config.json."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=2)
+    ensure_private_dir(CONFIG_DIR)
+    write_secret_text(CONFIG_FILE, json.dumps(config, indent=2), trailing_newline=True)
 
 
 def get(key: str) -> str:

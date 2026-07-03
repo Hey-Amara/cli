@@ -6,6 +6,24 @@ import click
 from heyamara_cli import config
 from heyamara_cli.prompts import select
 
+SECRET_KEYS = {"grafana_token"}
+
+
+def _mask_secret(value: str) -> str:
+    """Return a stable masked display value for a configured secret."""
+    if not value:
+        return "(not set)"
+    if len(value) <= 4:
+        return "********"
+    return f"********{value[-4:]}"
+
+
+def _display_value(key: str, value: str) -> str:
+    """Display config values without leaking secret material."""
+    if key in SECRET_KEYS:
+        return _mask_secret(value)
+    return value
+
 
 def _list_aws_profiles() -> list[str]:
     """Read available profiles from ~/.aws/config and ~/.aws/credentials."""
@@ -81,7 +99,7 @@ def set_config(key, value):
     cfg = config.load_user_config()
     cfg[key] = value
     config.save_user_config(cfg)
-    click.secho(f"{key} = {value}", fg="green")
+    click.secho(f"{key} = {_display_value(key, value)}", fg="green")
 
 
 @config_cmd.command("get")
@@ -97,15 +115,15 @@ def get_config(key):
     cfg = config.load_user_config()
     if key:
         if key in cfg:
-            click.echo(f"{key} = {cfg[key]}")
+            click.echo(f"{key} = {_display_value(key, cfg[key])}")
         else:
             click.secho(f"Unknown key: {key}", fg="red")
             raise SystemExit(1)
     else:
         click.secho(f"Config file: {config.CONFIG_FILE}", fg="cyan")
         for k, v in sorted(cfg.items()):
-            display_v = ("*" * 8 + v[-4:]) if k == "grafana_token" and len(v) > 4 else v
-            default = " (default)" if k in config.DEFAULTS and v == config.DEFAULTS[k] else ""
-            if k == "grafana_token" and not v:
-                default = " (not set)"
+            display_v = _display_value(k, v)
+            default = ""
+            if k not in SECRET_KEYS and k in config.DEFAULTS and v == config.DEFAULTS[k]:
+                default = " (default)"
             click.echo(f"  {k} = {display_v}{default}")

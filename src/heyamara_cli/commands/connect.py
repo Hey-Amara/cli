@@ -15,6 +15,7 @@ from heyamara_cli.completions import ENVIRONMENT
 from heyamara_cli.config import CLUSTERS, NAMESPACES, SERVICES as APP_SERVICES, SSM_PREFIX
 from heyamara_cli.helpers import check_port_free, debug, detect_iam_role, require_aws_session, run
 from heyamara_cli.prompts import select
+from heyamara_cli.secret_files import UnsafeSecretFileError, write_secret_text
 from heyamara_cli.tunnel import (
     CONNECT_TIMEOUT_SECONDS,
     build_database_url,
@@ -441,10 +442,11 @@ def _write_env_for(
     extra_hint: str | None = None,
 ) -> None:
     """Write the rewritten env file and print a status block."""
-    with open(output, "w") as f:
-        f.write(env_content)
-        if not env_content.endswith("\n"):
-            f.write("\n")
+    try:
+        write_secret_text(output, env_content, trailing_newline=True)
+    except UnsafeSecretFileError as exc:
+        click.secho(str(exc), fg="red")
+        raise SystemExit(1) from exc
 
     non_empty = [
         ln for ln in env_content.splitlines()
