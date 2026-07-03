@@ -24,7 +24,9 @@ def load_user_config() -> dict:
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE) as f:
-                config.update(json.load(f))
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                config.update(loaded)
         except (json.JSONDecodeError, OSError):
             pass
     return config
@@ -57,7 +59,8 @@ def get(key: str) -> str:
         env_val = environ.get(env_var)
         if env_val:
             return env_val
-    return load_user_config().get(key, DEFAULTS.get(key, ""))
+    value = load_user_config().get(key, DEFAULTS.get(key, ""))
+    return "" if value is None else str(value)
 
 
 # ---- Static config -----------------------------------------------------------

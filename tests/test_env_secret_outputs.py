@@ -35,6 +35,12 @@ class EnvSecretOutputTests(unittest.TestCase):
         with patches[0], patches[1], patches[2]:
             return self.runner.invoke(env_module.env, args)
 
+    def _combined_output(self, result):
+        stderr = getattr(result, "stderr", "") or ""
+        if stderr and stderr not in result.output:
+            return result.output + stderr
+        return result.output
+
     def test_env_pull_writes_private_output_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             output = Path(temp_dir) / "service.env"
@@ -65,9 +71,11 @@ class EnvSecretOutputTests(unittest.TestCase):
                 content="TOKEN=leaked-value",
             )
 
-            self.assertEqual(result.exit_code, 1, result.output)
-            self.assertIn("Refusing to write secret file through symlink", result.output)
-            self.assertNotIn("leaked-value", result.output)
+            combined = self._combined_output(result)
+            self.assertEqual(result.exit_code, 1, combined)
+            self.assertIn("Refusing to write secret file through symlink", combined)
+            self.assertNotIn("leaked-value", combined)
+            self.assertNotIn("Traceback", combined)
             self.assertEqual(target.read_text(), "SAFE=1")
 
     def test_env_pull_all_writes_private_directory_and_files(self):
@@ -84,13 +92,71 @@ class EnvSecretOutputTests(unittest.TestCase):
                 os.umask(old_umask)
 
             self.assertEqual(result.exit_code, 0, result.output)
-            self.assertEqual((output_dir / "ats-backend.staging.env").read_text(), "TOKEN=secret\n")
-            self.assertEqual((output_dir / "ae-backend.staging.env").read_text(), "TOKEN=secret\n")
+            backend_file = output_dir / "ats-backend.staging.env"
+            ae_file = output_dir / "ae-backend.staging.env"
+            self.assertEqual(backend_file.read_text(), "TOKEN=secret\n")
+            self.assertEqual(ae_file.read_text(), "TOKEN=secret\n")
             self.assertNotIn("secret", result.output)
             if os.name != "nt":
                 self.assertEqual(stat.S_IMODE(output_dir.stat().st_mode), 0o700)
-                self.assertEqual(stat.S_IMODE((output_dir / "ats-backend.staging.env").stat().st_mode), 0o600)
-                self.assertEqual(stat.S_IMODE((output_dir / "ae-backend.staging.env").stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(backend_file.stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(ae_file.stat().st_mode), 0o600)
+
+    def test_env_pull_all_does_not_chmod_existing_output_directory(self):
+        if os.name == "nt":
+            self.skipTest("POSIX directory modes are not meaningful on Windows")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir) / "existing-env-files"
+            output_dir.mkdir()
+            os.chmod(output_dir, 0o755)
+
+            with mock.patch.object(env_module, "SERVICES", ["ats-backend"]):
+                result = self._invoke_with_fake_ssm(
+                    ["pull-all", "staging", "-d", str(output_dir)],
+                    content="TOKEN=secret",
+                )
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertEqual(stat.S_IMODE(output_dir.stat().st_mode), 0o755)
+            output_file = output_dir / "ats-backend.staging.env"
+            self.assertEqual(output_file.read_text(), "TOKEN=secret\n")
+            self.assertEqual(stat.S_IMODE(output_file.stat().st_mode), 0o600)
+
+    def test_env_pull_reports_invalid_parent_without_traceback_or_secret(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            parent_file = Path(temp_dir) / "not-a-directory"
+            parent_file.write_text("blocker")
+
+            result = self._invoke_with_fake_ssm(
+                ["pull", "ats-backend", "staging", "-o", str(parent_file / "secret.env")],
+                content="TOKEN=leaked-value",
+            )
+
+            combined = self._combined_output(result)
+            self.assertEqual(result.exit_code, 1, combined)
+            self.assertIn("Could not", combined)
+            self.assertIn("secret output", combined)
+            self.assertNotIn("leaked-value", combined)
+            self.assertNotIn("Traceback", combined)
+
+    def test_env_pull_all_reports_file_output_dir_without_traceback_or_secret(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir) / "not-a-directory"
+            output_dir.write_text("blocker")
+
+            with mock.patch.object(env_module, "SERVICES", ["ats-backend"]):
+                result = self._invoke_with_fake_ssm(
+                    ["pull-all", "staging", "-d", str(output_dir)],
+                    content="TOKEN=leaked-value",
+                )
+
+            combined = self._combined_output(result)
+            self.assertEqual(result.exit_code, 1, combined)
+            self.assertIn("Could not", combined)
+            self.assertIn("secret output", combined)
+            self.assertNotIn("leaked-value", combined)
+            self.assertNotIn("Traceback", combined)
 
     def test_env_pull_all_refuses_symlink_output_directory(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -105,10 +171,12 @@ class EnvSecretOutputTests(unittest.TestCase):
                     content="TOKEN=leaked-value",
                 )
 
-            self.assertEqual(result.exit_code, 1, result.output)
-            self.assertIn("Refusing to write secret file through symlink", result.output)
+            combined = self._combined_output(result)
+            self.assertEqual(result.exit_code, 1, combined)
+            self.assertIn("Refusing to write secret file through symlink", combined)
             self.assertFalse((real_dir / "ats-backend.staging.env").exists())
-            self.assertNotIn("leaked-value", result.output)
+            self.assertNotIn("leaked-value", combined)
+            self.assertNotIn("Traceback", combined)
 
 
 if __name__ == "__main__":

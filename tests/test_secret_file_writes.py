@@ -7,9 +7,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import heyamara_cli.secret_files as secret_files
 from heyamara_cli.commands.connect import _write_env_for
 from heyamara_cli.secret_files import UnsafeSecretFileError, write_secret_text
-import heyamara_cli.secret_files as secret_files
 
 
 class SecretFileWriteTests(unittest.TestCase):
@@ -70,7 +70,11 @@ class SecretFileWriteTests(unittest.TestCase):
             if os.name != "nt":
                 os.chmod(output, 0o600)
 
-            with mock.patch.object(secret_files, "_replace_from_temp", side_effect=OSError("boom")):
+            with mock.patch.object(
+                secret_files,
+                "_replace_from_temp",
+                side_effect=OSError("boom"),
+            ):
                 with self.assertRaises(OSError):
                     write_secret_text(output, "TOKEN=secret", trailing_newline=True)
 
@@ -89,6 +93,20 @@ class SecretFileWriteTests(unittest.TestCase):
 
             self.assertEqual(target.read_text(), "SAFE=1")
 
+    def test_write_secret_text_refuses_non_regular_target(self):
+        if not hasattr(os, "mkfifo"):
+            self.skipTest("fifo support unavailable")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "secret.env"
+            try:
+                os.mkfifo(output)
+            except OSError as exc:
+                self.skipTest(f"fifo creation unavailable: {exc}")
+
+            with self.assertRaises(UnsafeSecretFileError):
+                write_secret_text(output, "TOKEN=secret", trailing_newline=True)
+
     def test_write_secret_text_refuses_symlink_parent(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             real_dir = Path(temp_dir) / "real"
@@ -100,6 +118,24 @@ class SecretFileWriteTests(unittest.TestCase):
                 write_secret_text(link_dir / "secret.env", "TOKEN=secret", trailing_newline=True)
 
             self.assertFalse((real_dir / "secret.env").exists())
+
+    def test_write_secret_text_allows_trusted_platform_tmp_alias(self):
+        tmp_path = Path("/tmp")
+        try:
+            is_trusted_alias = secret_files._is_trusted_platform_symlink(tmp_path)
+        except OSError:
+            is_trusted_alias = False
+        if not is_trusted_alias:
+            self.skipTest("/tmp is not a trusted top-level platform alias on this host")
+
+        output = tmp_path / f"heyamara-secret-test-{os.getpid()}-{id(self)}.env"
+        try:
+            write_secret_text(output, "TOKEN=secret", trailing_newline=True)
+            self.assertEqual(output.read_text(), "TOKEN=secret\n")
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+        finally:
+            output.unlink(missing_ok=True)
 
     def test_connect_env_for_output_is_private_and_does_not_echo_secret_values(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -130,8 +166,9 @@ class SecretFileWriteTests(unittest.TestCase):
             target.write_text("SAFE=1")
             self._symlink_or_skip(target, link)
             stdout = io.StringIO()
+            stderr = io.StringIO()
 
-            with contextlib.redirect_stdout(stdout):
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 with self.assertRaises(SystemExit) as cm:
                     _write_env_for(
                         str(link),
@@ -143,7 +180,7 @@ class SecretFileWriteTests(unittest.TestCase):
 
             self.assertEqual(cm.exception.code, 1)
             self.assertEqual(target.read_text(), "SAFE=1")
-            command_output = stdout.getvalue()
+            command_output = stdout.getvalue() + stderr.getvalue()
             self.assertIn("Refusing to write secret file through symlink", command_output)
             self.assertNotIn("postgres://example", command_output)
             self.assertNotIn("super-secret", command_output)

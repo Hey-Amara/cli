@@ -53,7 +53,7 @@ def _write_secret_env_file(path: str, content: str) -> None:
     try:
         write_secret_text(path, content, trailing_newline=True)
     except UnsafeSecretFileError as exc:
-        click.secho(str(exc), fg="red")
+        click.secho(str(exc), fg="red", err=True)
         raise SystemExit(1) from exc
 
 
@@ -131,9 +131,9 @@ def pull_all(environment, output_dir, profile):
     profile, region = _resolve(profile)
     require_aws_session(profile)
     try:
-        ensure_private_dir(output_dir)
+        ensure_private_dir(output_dir, chmod_existing=False)
     except UnsafeSecretFileError as exc:
-        click.secho(str(exc), fg="red")
+        click.secho(str(exc), fg="red", err=True)
         raise SystemExit(1) from exc
 
     success = 0

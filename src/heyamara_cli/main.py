@@ -209,7 +209,7 @@ def switch(profile):
     try:
         config.save_user_config(cfg)
     except UnsafeSecretFileError as exc:
-        click.secho(str(exc), fg="red")
+        click.secho(str(exc), fg="red", err=True)
         raise SystemExit(1) from exc
     click.secho(f"Switched: {old} -> {profile}", fg="green")
 

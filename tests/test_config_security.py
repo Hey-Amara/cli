@@ -36,6 +36,12 @@ class ConfigSecurityTests(unittest.TestCase):
         except OSError as exc:
             self.skipTest(f"symlink creation unavailable: {exc}")
 
+    def _combined_output(self, result):
+        stderr = getattr(result, "stderr", "") or ""
+        if stderr and stderr not in result.output:
+            return result.output + stderr
+        return result.output
+
     def test_config_set_masks_grafana_token_persists_raw_value_and_writes_private_file(self):
         token = "grafana-secret-token-123456"
 
@@ -99,6 +105,21 @@ class ConfigSecurityTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("grafana_token = (not set)", result.output)
 
+    def test_config_get_ignores_valid_non_object_json_config(self):
+        config.CONFIG_DIR.mkdir(parents=True)
+        config.CONFIG_FILE.write_text('"not-a-config-object"\n')
+
+        result = self.runner.invoke(config_cmd, ["get", "aws_profile"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(result.output, "aws_profile = default\n")
+
+    def test_config_get_accessor_returns_string_for_non_string_json_value(self):
+        config.CONFIG_DIR.mkdir(parents=True)
+        config.CONFIG_FILE.write_text('{"aws_profile": 123}\n')
+
+        self.assertEqual(config.get("aws_profile"), "123")
+
     def test_config_set_refuses_symlink_config_file_without_overwriting_target(self):
         token = "grafana-secret-token-123456"
         config.CONFIG_DIR.mkdir(parents=True)
@@ -108,10 +129,12 @@ class ConfigSecurityTests(unittest.TestCase):
 
         result = self.runner.invoke(config_cmd, ["set", "grafana_token", token])
 
-        self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("Refusing to write secret file through symlink", result.output)
-        self.assertIn("regular output file", result.output)
-        self.assertNotIn(token, result.output)
+        combined = self._combined_output(result)
+        self.assertEqual(result.exit_code, 1, combined)
+        self.assertIn("Refusing to write secret file through symlink", combined)
+        self.assertIn("regular output file", combined)
+        self.assertNotIn(token, combined)
+        self.assertNotIn("Traceback", combined)
         self.assertEqual(target.read_text(), '{"grafana_token": "safe"}\n')
 
     def test_switch_refuses_symlink_config_file_without_traceback(self):
@@ -123,9 +146,10 @@ class ConfigSecurityTests(unittest.TestCase):
         with mock.patch("heyamara_cli.version_check.check_and_notify", lambda: None):
             result = self.runner.invoke(cli, ["switch", "new-profile"])
 
-        self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("Refusing to write secret file through symlink", result.output)
-        self.assertNotIn("Traceback", result.output)
+        combined = self._combined_output(result)
+        self.assertEqual(result.exit_code, 1, combined)
+        self.assertIn("Refusing to write secret file through symlink", combined)
+        self.assertNotIn("Traceback", combined)
         self.assertEqual(target.read_text(), '{"aws_profile": "safe"}\n')
 
 

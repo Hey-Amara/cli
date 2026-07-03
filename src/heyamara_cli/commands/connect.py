@@ -7,6 +7,7 @@ import shutil
 import signal
 import subprocess
 import urllib.parse
+from typing import Optional
 
 import click
 
@@ -37,7 +38,7 @@ DB_NAMES = {
 }
 
 
-def _resolve_profile(profile: str, region: str | None = None) -> tuple[str, str]:
+def _resolve_profile(profile: str, region: Optional[str] = None) -> tuple[str, str]:
     """Resolve profile and region. region param overrides config."""
     p = profile or config.get("aws_profile")
     r = region or config.get("aws_region")
@@ -375,7 +376,7 @@ def _fetch_service_env(service: str, environment: str, profile: str, region: str
         return raw
 
 
-def _rewrite_db_url_host(url: str, new_host: str, new_port: int, db_name: str | None = None) -> str:
+def _rewrite_db_url_host(url: str, new_host: str, new_port: int, db_name: Optional[str] = None) -> str:
     """Rewrite a postgres URL to point at new_host:new_port, preserve user:password.
 
     Preserves the original user:password portion verbatim so an already
@@ -399,7 +400,7 @@ def _rewrite_urls_in_env(
     keys: set[str],
     new_host: str,
     new_port: int,
-    db_name: str | None = None,
+    db_name: Optional[str] = None,
 ) -> tuple[str, list[str]]:
     """Rewrite the host:port of any env var whose key is in `keys`.
 
@@ -439,13 +440,13 @@ def _write_env_for(
     rewritten_keys: list[str],
     service: str,
     local_port: int,
-    extra_hint: str | None = None,
+    extra_hint: Optional[str] = None,
 ) -> None:
     """Write the rewritten env file and print a status block."""
     try:
         write_secret_text(output, env_content, trailing_newline=True)
     except UnsafeSecretFileError as exc:
-        click.secho(str(exc), fg="red")
+        click.secho(str(exc), fg="red", err=True)
         raise SystemExit(1) from exc
 
     non_empty = [
