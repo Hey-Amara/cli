@@ -192,6 +192,30 @@ class SecretFileWriteTests(unittest.TestCase):
 
             self.assertFalse((real_dir / "secret.env").exists())
 
+    def test_write_secret_text_refuses_relative_output_from_symlinked_logical_cwd(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            real_dir = Path(temp_dir) / "real"
+            link_dir = Path(temp_dir) / "link"
+            real_dir.mkdir()
+            self._symlink_or_skip(real_dir, link_dir)
+
+            old_cwd = Path.cwd()
+            old_pwd = os.environ.get("PWD")
+            os.chdir(link_dir)
+            os.environ["PWD"] = str(link_dir)
+            try:
+                with self.assertRaises(UnsafeSecretFileError) as cm:
+                    write_secret_text("secret.env", "TOKEN=secret", trailing_newline=True)
+            finally:
+                os.chdir(old_cwd)
+                if old_pwd is None:
+                    os.environ.pop("PWD", None)
+                else:
+                    os.environ["PWD"] = old_pwd
+
+            self.assertIn("Refusing to write secret file through symlink", str(cm.exception))
+            self.assertFalse((real_dir / "secret.env").exists())
+
     def test_write_secret_text_allows_trusted_platform_tmp_alias(self):
         tmp_path = Path("/tmp")
         try:

@@ -81,6 +81,36 @@ class EnvSecretOutputTests(unittest.TestCase):
             self.assertNotIn("Traceback", combined)
             self.assertEqual(target.read_text(), "SAFE=1")
 
+    def test_env_pull_refuses_default_relative_output_from_symlinked_logical_cwd(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            real_dir = Path(temp_dir) / "real"
+            link_dir = Path(temp_dir) / "link"
+            real_dir.mkdir()
+            self._symlink_or_skip(real_dir, link_dir)
+
+            old_cwd = Path.cwd()
+            old_pwd = os.environ.get("PWD")
+            os.chdir(link_dir)
+            os.environ["PWD"] = str(link_dir)
+            try:
+                result = self._invoke_with_fake_ssm(
+                    ["pull", "ats-backend", "staging"],
+                    content="TOKEN=leaked-value",
+                )
+            finally:
+                os.chdir(old_cwd)
+                if old_pwd is None:
+                    os.environ.pop("PWD", None)
+                else:
+                    os.environ["PWD"] = old_pwd
+
+            combined = self._combined_output(result)
+            self.assertEqual(result.exit_code, 1, combined)
+            self.assertIn("Refusing to write secret file through symlink", combined)
+            self.assertNotIn("leaked-value", combined)
+            self.assertNotIn("Traceback", combined)
+            self.assertFalse((real_dir / "ats-backend.staging.env").exists())
+
     def test_env_pull_all_writes_private_directory_and_files(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir) / "env-files"

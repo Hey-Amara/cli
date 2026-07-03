@@ -124,6 +124,41 @@ def _reject_symlink_components(path: Path) -> None:
             _raise_write_error("inspect", component, exc)
 
 
+def _trusted_logical_cwd() -> Optional[Path]:
+    """Return shell logical PWD when it names the current directory.
+
+    ``os.getcwd()`` reports the physical directory after ``cd`` through a
+    symlink. Shells usually preserve the logical path in ``PWD``; when that
+    value still points at the same directory, use it only to reject symlinked
+    cwd ancestors for relative secret outputs. A stale or forged ``PWD`` is
+    ignored so it cannot authorize a path.
+    """
+    raw_pwd = os.environ.get("PWD")
+    if not raw_pwd:
+        return None
+
+    logical_cwd = Path(raw_pwd)
+    if not logical_cwd.is_absolute():
+        return None
+
+    try:
+        if logical_cwd.samefile(Path.cwd()):
+            return logical_cwd
+    except OSError:
+        return None
+    return None
+
+
+def _reject_symlinked_logical_cwd(path: Path) -> None:
+    """Reject relative outputs launched from a symlinked logical cwd."""
+    if path.is_absolute():
+        return
+
+    logical_cwd = _trusted_logical_cwd()
+    if logical_cwd is not None:
+        _reject_symlink_components(logical_cwd)
+
+
 def _dir_flags() -> int:
     flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
@@ -278,6 +313,7 @@ def ensure_private_dir(path: SecretPath, *, chmod_existing: bool = True) -> None
     """
     directory = Path(path)
     try:
+        _reject_symlinked_logical_cwd(directory)
         if _can_walk_with_dir_fd():
             fd, created, _ = _open_directory_fd(directory, create_missing=True)
             try:
@@ -390,6 +426,7 @@ def _cleanup_temp(parent_fd: Optional[int], temp_name: Optional[str], temp_path:
 def write_secret_text(path: SecretPath, content: str, *, trailing_newline: bool = False) -> None:
     """Atomically write secret-bearing text with private file permissions."""
     output_path = Path(path)
+    _reject_symlinked_logical_cwd(output_path)
     if output_path.name in {"", ".", ".."}:
         raise UnsafeSecretFileError(
             f"Secret output path is not a regular file path: {output_path}. "
