@@ -176,6 +176,29 @@ class ConfigSecurityTests(unittest.TestCase):
                     with mock.patch("heyamara_cli.version_check._fetch_latest_version", return_value=""):
                         version_check.check_and_notify()
 
+    def test_update_check_backs_off_after_failed_fetch(self):
+        original_cache_dir = version_check.CACHE_DIR
+        original_cache_file = version_check.CACHE_FILE
+        self.addCleanup(setattr, version_check, "CACHE_DIR", original_cache_dir)
+        self.addCleanup(setattr, version_check, "CACHE_FILE", original_cache_file)
+
+        cache_dir = Path(self.temp_dir.name) / ".heyamara-cache"
+        cache_file = cache_dir / ".update-check"
+        version_check.CACHE_DIR = cache_dir
+        version_check.CACHE_FILE = cache_file
+
+        with mock.patch(
+            "heyamara_cli.version_check.importlib.metadata.version",
+            return_value="1.8.5",
+        ):
+            with mock.patch("heyamara_cli.version_check._fetch_latest_version", return_value="") as fetch:
+                version_check.check_and_notify()
+                version_check.check_and_notify()
+
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(version_check._read_cache()["latest"], "1.8.5")
+        self.assertTrue(version_check._read_cache()["failed"])
+
     def test_config_set_refuses_symlink_config_file_without_overwriting_target(self):
         token = "grafana-secret-token-123456"
         config.CONFIG_DIR.mkdir(parents=True)
