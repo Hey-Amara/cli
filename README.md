@@ -461,11 +461,13 @@ heyamara --help
 heyamara -v logs staging ats-backend --since 1m --no-follow   # -v for debug output
 ```
 
-For release workflow or release-related `pyproject.toml` changes, run the
-same local checks as the PR validation workflow:
+For release workflow, release harness or fixture, or release-related
+`pyproject.toml` changes, run the same local checks as the PR validation
+workflow:
 
 ```bash
 python3 .github/tests/release-workflow-state-machine.py
+shellcheck --version
 go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 \
   .github/workflows/release.yml \
   .github/workflows/release-workflow-validation.yml

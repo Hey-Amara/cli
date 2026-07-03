@@ -5,8 +5,7 @@ on:
     paths:
       - .github/workflows/release.yml
       - .github/workflows/release-workflow-validation.yml
-      - .github/tests/release-workflow-state-machine.py
-      - .github/tests/fixtures/release-workflow-legacy.yml
+      - .github/tests/**
       - pyproject.toml
 
 permissions:
@@ -26,6 +25,7 @@ jobs:
       - name: Run actionlint
         run: |
           set -euo pipefail
+          shellcheck --version
           go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 \
             .github/workflows/release.yml \
             .github/workflows/release-workflow-validation.yml
