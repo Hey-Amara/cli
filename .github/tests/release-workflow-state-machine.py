@@ -92,6 +92,16 @@ def extract_step_if(workflow: Path, step_name: str) -> Optional[str]:
     raise AssertionError(f"could not find step {step_name!r}")
 
 
+def assert_no_lossy_workflow_concurrency(workflow: Path) -> None:
+    for line in workflow.read_text().splitlines():
+        if line.startswith("concurrency:"):
+            raise AssertionError(
+                "release workflow must not use top-level concurrency without true queueing; "
+                "GitHub Actions default concurrency can cancel older pending release runs"
+            )
+    print("workflow_concurrency: none")
+
+
 def assert_workflow_guards(workflow: Path) -> None:
     expected = {
         "Check tag and GitHub release state": "steps.ver.outputs.version_changed == 'true'",
@@ -407,6 +417,7 @@ def run_legacy_red_check(root: Path, work: Path, original_sha: str) -> None:
 
 
 def main() -> None:
+    assert_no_lossy_workflow_concurrency(WORKFLOW)
     assert_workflow_guards(WORKFLOW)
     scripts = {
         "version": extract_step_run(WORKFLOW, "Read version from pyproject.toml"),
