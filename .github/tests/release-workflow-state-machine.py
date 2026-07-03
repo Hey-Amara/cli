@@ -16,9 +16,15 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 WORKFLOW = Path(os.environ.get("WORKFLOW_FILE", ".github/workflows/release.yml"))
-BASE_REF = os.environ.get("BASE_REF", "origin/main")
+LEGACY_WORKFLOW = Path(
+    os.environ.get(
+        "LEGACY_WORKFLOW_FILE",
+        ".github/tests/fixtures/release-workflow-legacy.yml",
+    )
+)
 TAG = os.environ.get("TAG", "v1.2.3")
 HARNESS_TOOLS = (
     "awk",
@@ -41,7 +47,7 @@ def extract_step_run(workflow: Path, step_name: str) -> str:
         if line.strip() != needle:
             continue
 
-        run_index: int | None = None
+        run_index: Optional[int] = None
         for candidate in range(index + 1, len(lines)):
             stripped = lines[candidate].strip()
             if stripped.startswith("- name: "):
@@ -68,7 +74,7 @@ def extract_step_run(workflow: Path, step_name: str) -> str:
     raise AssertionError(f"could not find run block for step {step_name!r}")
 
 
-def extract_step_if(workflow: Path, step_name: str) -> str | None:
+def extract_step_if(workflow: Path, step_name: str) -> Optional[str]:
     lines = workflow.read_text().splitlines()
     needle = f"- name: {step_name}"
     for index, line in enumerate(lines):
@@ -106,8 +112,8 @@ def assert_workflow_guards(workflow: Path) -> None:
 def run(
     cmd: list[str],
     *,
-    cwd: Path | None = None,
-    env: dict[str, str] | None = None,
+    cwd: Optional[Path] = None,
+    env: Optional[dict[str, str]] = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, cwd=cwd, env=env, text=True, capture_output=True, check=True)
 
@@ -303,6 +309,7 @@ def run_release_case(
 
     expected = {
         "missing_tag_missing_release": ("false", "false", "created", "created", 1),
+        "missing_tag_existing_release": ("false", "true", "created", "skipped", 0),
         "existing_tag_missing_release": ("true", "false", "skipped", "created", 1),
         "existing_tag_existing_release": ("true", "true", "skipped", "skipped", 0),
     }[name]
@@ -371,43 +378,32 @@ def run_failure_case(
     print(f"{name}: failed_closed=true")
 
 
-def run_base_red_check(root: Path, work: Path, original_sha: str) -> None:
-    base_workflow = root / "base-release.yml"
-    show = subprocess.run(
-        ["git", "show", f"{BASE_REF}:.github/workflows/release.yml"],
-        text=True,
-        capture_output=True,
-    )
-    if show.returncode:
-        message = f"base workflow unavailable for BASE_REF {BASE_REF}"
-        require_base_ref = os.environ.get("REQUIRE_BASE_REF") == "1"
-        if require_base_ref or os.environ.get("GITHUB_ACTIONS") == "true":
-            raise AssertionError(message)
-        print(f"base_workflow_existing_tag_missing_release: skipped ({message})")
-        return
-    base_workflow.write_text(show.stdout)
-    tagcheck = extract_step_run(base_workflow, "Check if tag already exists")
-    release = extract_step_run(base_workflow, "Create tag and GitHub release")
+def run_legacy_red_check(root: Path, work: Path, original_sha: str) -> None:
+    if not LEGACY_WORKFLOW.exists():
+        raise AssertionError(f"legacy workflow fixture not found: {LEGACY_WORKFLOW}")
+
+    tagcheck = extract_step_run(LEGACY_WORKFLOW, "Check if tag already exists")
+    release = extract_step_run(LEGACY_WORKFLOW, "Create tag and GitHub release")
 
     reset_tag(work)
     shutil.rmtree(root / "releases")
     (root / "releases").mkdir()
     (root / "commands.log").write_text("")
     create_tag(work, original_sha)
-    output = root / "base.outputs"
+    output = root / "legacy.outputs"
     env = base_env(root, output, original_sha)
     result = run_step(tagcheck, cwd=work, env=env)
     if result.returncode:
-        raise AssertionError(f"base tag check failed\n{result.stderr}")
+        raise AssertionError(f"legacy tag check failed\n{result.stderr}")
     if output_values(output).get("exists") == "false":
         run_step(release, cwd=work, env=env)
     assert_eq(
         command_log(root).count("release_create"),
         0,
-        "base workflow should skip release creation when tag exists",
+        "legacy workflow should skip release creation when tag exists",
     )
-    assert_eq((root / "releases" / TAG).exists(), False, "base workflow should leave release missing")
-    print("base_workflow_existing_tag_missing_release: failed_as_expected=true")
+    assert_eq((root / "releases" / TAG).exists(), False, "legacy workflow should leave release missing")
+    print("legacy_workflow_existing_tag_missing_release: failed_as_expected=true")
 
 
 def main() -> None:
@@ -431,6 +427,7 @@ def main() -> None:
         work, original_sha = setup_repo(root)
 
         run_release_case(root, work, scripts, "missing_tag_missing_release", False, False, original_sha)
+        run_release_case(root, work, scripts, "missing_tag_existing_release", False, True, original_sha)
         run_release_case(root, work, scripts, "existing_tag_missing_release", True, False, original_sha)
         run_release_case(root, work, scripts, "existing_tag_existing_release", True, True, original_sha)
 
@@ -456,7 +453,7 @@ def main() -> None:
 
         run_failure_case(root, work, scripts["state"], "mismatched_tag", original_sha, current_sha)
         run_failure_case(root, work, scripts["state"], "unknown_release_state", original_sha, current_sha)
-        run_base_red_check(root, work, original_sha)
+        run_legacy_red_check(root, work, original_sha)
 
 
 if __name__ == "__main__":

@@ -55,9 +55,11 @@ jobs:
             fi
           fi
 
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=v$version" >> "$GITHUB_OUTPUT"
-          echo "version_changed=$version_changed" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=$version"
+            echo "tag=v$version"
+            echo "version_changed=$version_changed"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Check tag and GitHub release state
         if: steps.ver.outputs.version_changed == 'true'
@@ -67,7 +69,24 @@ jobs:
           TAG: ${{ steps.ver.outputs.tag }}
         run: |
           set -euo pipefail
-          git fetch --force --tags origin
+          askpass=$(mktemp "${RUNNER_TEMP:-/tmp}/git-askpass.XXXXXX")
+          release_response=$(mktemp "${RUNNER_TEMP:-/tmp}/gh-release-view.XXXXXX")
+          release_error=$(mktemp "${RUNNER_TEMP:-/tmp}/gh-release-view.XXXXXX")
+          cleanup() {
+            rm -f "${askpass}" "${release_response}" "${release_error}"
+          }
+          trap cleanup EXIT
+          cat > "${askpass}" <<'EOF_ASKPASS'
+          #!/usr/bin/env bash
+          case "$1" in
+            Username*) printf '%s\n' 'x-access-token' ;;
+            Password*) printf '%s\n' "${GH_TOKEN}" ;;
+            *) printf '\n' ;;
+          esac
+          EOF_ASKPASS
+          chmod 700 "${askpass}"
+
+          GIT_ASKPASS="${askpass}" GIT_TERMINAL_PROMPT=0 git fetch --force --tags origin
 
           if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
             echo "Tag ${TAG} already exists."
@@ -76,32 +95,33 @@ jobs:
               echo "Tag ${TAG} points to ${tag_commit}, not triggering commit ${GITHUB_SHA}." >&2
               exit 1
             fi
-            echo "tag_exists=true" >> "$GITHUB_OUTPUT"
+            tag_exists=true
           else
             echo "Tag ${TAG} does not exist yet."
-            echo "tag_exists=false" >> "$GITHUB_OUTPUT"
+            tag_exists=false
           fi
-
-          release_response=$(mktemp "${RUNNER_TEMP:-/tmp}/gh-release-view.XXXXXX")
-          release_error=$(mktemp "${RUNNER_TEMP:-/tmp}/gh-release-view.XXXXXX")
-          trap 'rm -f "${release_response}" "${release_error}"' EXIT
 
           if gh api --include --silent \
             "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" \
             >"${release_response}" 2>"${release_error}"; then
             echo "GitHub release ${TAG} already exists."
-            echo "release_exists=true" >> "$GITHUB_OUTPUT"
+            release_exists=true
           else
             http_status=$(awk 'toupper($1) ~ /^HTTP/ { status=$2 } END { print status }' "${release_response}")
             if [ "$http_status" = "404" ]; then
               echo "GitHub release ${TAG} does not exist yet."
-              echo "release_exists=false" >> "$GITHUB_OUTPUT"
+              release_exists=false
             else
               echo "Could not determine GitHub release state for ${TAG}:" >&2
               cat "${release_error}" >&2
               exit 1
             fi
           fi
+
+          {
+            echo "tag_exists=$tag_exists"
+            echo "release_exists=$release_exists"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create and push missing release tag
         if: steps.ver.outputs.version_changed == 'true' && steps.state.outputs.tag_exists == 'false'

@@ -461,11 +461,14 @@ heyamara --help
 heyamara -v logs staging ats-backend --since 1m --no-follow   # -v for debug output
 ```
 
-For release workflow changes, run the local state-machine harness before
-opening a PR:
+For release workflow or release-related `pyproject.toml` changes, run the
+same local checks as the PR validation workflow:
 
 ```bash
 python3 .github/tests/release-workflow-state-machine.py
+go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 \
+  .github/workflows/release.yml \
+  .github/workflows/release-workflow-validation.yml
 ```
 
 ### Releasing
@@ -492,10 +495,14 @@ intended commit, then create the release without allowing `gh` to create a tag
 implicitly:
 
 ```bash
+set -euo pipefail
+# Check out the intended release commit first, then set this to the release tag.
+tag=vX.Y.Z
+expected_commit=$(git rev-parse HEAD)
 git fetch --tags origin
-git rev-list -n 1 vX.Y.Z
-git rev-parse <expected-commit>
-gh release create vX.Y.Z --repo Hey-Amara/cli --title "vX.Y.Z" --generate-notes --verify-tag
+tag_commit=$(git rev-list -n 1 "$tag")
+test "$tag_commit" = "$expected_commit"
+gh release create "$tag" --repo Hey-Amara/cli --title "$tag" --generate-notes --verify-tag
 ```
 
 ## Troubleshooting
