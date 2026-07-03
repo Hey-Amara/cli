@@ -31,9 +31,12 @@ def _read_cache() -> dict:
 
 def _write_cache(latest: str) -> None:
     """Write a version check result to cache."""
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    with open(CACHE_FILE, "w") as f:
-        json.dump({"latest": latest, "checked_at": time.time()}, f)
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        with open(CACHE_FILE, "w") as f:
+            json.dump({"latest": latest, "checked_at": time.time()}, f)
+    except OSError:
+        pass
 
 
 def _fetch_latest_version() -> str:

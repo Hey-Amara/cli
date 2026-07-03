@@ -320,7 +320,7 @@ heyamara login --profile amara-prod
 heyamara config get                    # Show all settings (token masked)
 heyamara config set                    # Interactive setting picker
 heyamara config set aws_profile        # Pick from available AWS profiles
-heyamara config set grafana_token      # Masked input for Grafana token
+heyamara config set grafana_token      # Masked input/output for Grafana token
 ```
 
 Config file: `~/.heyamara/config.json`

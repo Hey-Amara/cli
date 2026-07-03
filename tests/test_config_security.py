@@ -7,7 +7,7 @@ from unittest import mock
 
 from click.testing import CliRunner
 
-from heyamara_cli import config
+from heyamara_cli import config, version_check
 from heyamara_cli.commands.config_cmd import config_cmd
 from heyamara_cli.main import cli
 
@@ -37,7 +37,10 @@ class ConfigSecurityTests(unittest.TestCase):
             self.skipTest(f"symlink creation unavailable: {exc}")
 
     def _combined_output(self, result):
-        stderr = getattr(result, "stderr", "") or ""
+        try:
+            stderr = result.stderr or ""
+        except ValueError:
+            stderr = ""
         if stderr and stderr not in result.output:
             return result.output + stderr
         return result.output
@@ -119,6 +122,19 @@ class ConfigSecurityTests(unittest.TestCase):
         config.CONFIG_FILE.write_text('{"aws_profile": 123}\n')
 
         self.assertEqual(config.get("aws_profile"), "123")
+
+    def test_update_check_cache_write_failure_is_non_blocking(self):
+        original_cache_dir = version_check.CACHE_DIR
+        original_cache_file = version_check.CACHE_FILE
+        self.addCleanup(setattr, version_check, "CACHE_DIR", original_cache_dir)
+        self.addCleanup(setattr, version_check, "CACHE_FILE", original_cache_file)
+
+        blocker = Path(self.temp_dir.name) / ".heyamara"
+        blocker.write_text("not a directory")
+        version_check.CACHE_DIR = blocker
+        version_check.CACHE_FILE = blocker / ".update-check"
+
+        version_check._write_cache("9.9.9")
 
     def test_config_set_refuses_symlink_config_file_without_overwriting_target(self):
         token = "grafana-secret-token-123456"

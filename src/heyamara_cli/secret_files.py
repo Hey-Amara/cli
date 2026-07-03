@@ -52,6 +52,27 @@ def _is_trusted_platform_symlink(component: Path) -> bool:
         return False
 
 
+def _is_windows_reparse_point(path: Path) -> bool:
+    """Return True for Windows junction/reparse points that can redirect writes."""
+    if os.name != "nt":
+        return False
+
+    is_junction = getattr(path, "is_junction", None)
+    try:
+        if callable(is_junction) and is_junction():
+            return True
+        attrs = getattr(path.lstat(), "st_file_attributes", 0)
+    except OSError:
+        return False
+    return bool(attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
+def _is_unsafe_link_component(path: Path) -> bool:
+    if path.is_symlink():
+        return not _is_trusted_platform_symlink(path)
+    return _is_windows_reparse_point(path)
+
+
 def _normalize_trusted_platform_alias(path: Path) -> Path:
     """Resolve root-owned platform aliases in absolute paths before fd walking."""
     if not path.is_absolute() or len(path.parts) < 2:
@@ -95,7 +116,7 @@ def _reject_symlink_components(path: Path) -> None:
     """Best-effort fallback symlink check for platforms without dir-fd walking."""
     for component in _existing_path_parts(path):
         try:
-            if component.is_symlink() and not _is_trusted_platform_symlink(component):
+            if _is_unsafe_link_component(component):
                 _raise_unsafe_symlink(component)
         except UnsafeSecretFileError:
             raise
@@ -165,14 +186,24 @@ def _open_directory_fd(path: Path, *, create_missing: bool) -> tuple[int, bool, 
             except FileNotFoundError as exc:
                 if not create_missing:
                     _raise_write_error("open", current, exc)
+                created_by_this_call = True
                 try:
                     os.mkdir(part, SECRET_DIR_MODE, dir_fd=fd)
                 except OSError as mkdir_exc:
-                    _raise_write_error("create", current, mkdir_exc)
+                    if (
+                        not isinstance(mkdir_exc, FileExistsError)
+                        and mkdir_exc.errno != errno.EEXIST
+                    ):
+                        _raise_write_error("create", current, mkdir_exc)
+                    created_by_this_call = False
                 child_fd = _open_dir_child(fd, part, current)
-                if hasattr(os, "fchmod"):
-                    os.fchmod(child_fd, SECRET_DIR_MODE)
-                if index == len(parts) - 1:
+                if hasattr(os, "fchmod") and created_by_this_call:
+                    try:
+                        os.fchmod(child_fd, SECRET_DIR_MODE)
+                    except Exception:
+                        os.close(child_fd)
+                        raise
+                if index == len(parts) - 1 and created_by_this_call:
                     created_final = True
             os.close(fd)
             fd = child_fd
@@ -231,7 +262,7 @@ def _ensure_private_created_dirs(directory: Path) -> bool:
     missing = _missing_dirs(directory)
     directory.mkdir(parents=True, exist_ok=True, mode=SECRET_DIR_MODE)
     for created in reversed(missing):
-        if created.is_symlink():
+        if _is_unsafe_link_component(created):
             _raise_unsafe_symlink(created)
         if created.is_dir():
             _chmod_path_private(created, SECRET_DIR_MODE, directory=True)
@@ -257,9 +288,9 @@ def ensure_private_dir(path: SecretPath, *, chmod_existing: bool = True) -> None
             return
 
         _reject_symlink_components(directory)
-        existed = directory.exists() or directory.is_symlink()
+        existed = directory.exists() or _is_unsafe_link_component(directory)
         created = _ensure_private_created_dirs(directory)
-        if directory.is_symlink():
+        if _is_unsafe_link_component(directory):
             _raise_unsafe_symlink(directory)
         if not directory.is_dir():
             raise NotADirectoryError(f"Secret output path is not a directory: {directory}")
@@ -301,6 +332,8 @@ def _ensure_final_path_is_regular_or_missing(parent_fd: Optional[int], path: Pat
         if parent_fd is not None and _SUPPORTS_STAT_DIR_FD:
             mode = os.stat(final_name, dir_fd=parent_fd, follow_symlinks=False).st_mode
         else:
+            if _is_unsafe_link_component(path):
+                _raise_unsafe_symlink(path)
             mode = path.lstat().st_mode
     except FileNotFoundError:
         return
@@ -325,9 +358,21 @@ def _replace_from_temp(
 ) -> None:
     if parent_fd is not None and _SUPPORTS_RENAME_DIR_FD:
         os.rename(temp_name, final_name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-        os.fsync(parent_fd)
     else:
         os.replace(temp_path, final_path)
+
+
+def _sync_parent_dir(parent_fd: Optional[int], path: Path) -> None:
+    if parent_fd is None:
+        return
+    try:
+        os.fsync(parent_fd)
+    except OSError as exc:
+        detail = exc.strerror or str(exc)
+        raise UnsafeSecretFileError(
+            f"Secret output was written to {path}, but final directory sync failed: {detail}. "
+            "Verify the file before retrying."
+        ) from exc
 
 
 def _cleanup_temp(parent_fd: Optional[int], temp_name: Optional[str], temp_path: Optional[Path]) -> None:
@@ -360,14 +405,13 @@ def write_secret_text(path: SecretPath, content: str, *, trailing_newline: bool 
 
     try:
         if _can_walk_with_dir_fd():
-            parent_fd, _, normalized_parent = _open_directory_fd(parent, create_missing=True)
+            parent_fd, _, normalized_parent = _open_directory_fd(parent, create_missing=False)
             output_path = normalized_parent / output_path.name
         else:
             output_path = _normalize_trusted_platform_alias(output_path)
             parent = output_path.parent
             _reject_symlink_components(output_path)
-            _ensure_private_created_dirs(parent)
-            if parent.is_symlink():
+            if _is_unsafe_link_component(parent):
                 _raise_unsafe_symlink(parent)
             if not parent.is_dir():
                 raise NotADirectoryError(f"Secret output parent is not a directory: {parent}")
@@ -385,6 +429,7 @@ def write_secret_text(path: SecretPath, content: str, *, trailing_newline: bool 
             os.fsync(f.fileno())
         _replace_from_temp(parent_fd, temp_name, temp_path, output_path.name, output_path)
         replaced = True
+        _sync_parent_dir(parent_fd, output_path)
     except UnsafeSecretFileError:
         raise
     except OSError as exc:

@@ -1,6 +1,7 @@
 import base64
 import gzip
 import os
+from typing import Optional
 
 import click
 
@@ -9,7 +10,11 @@ from heyamara_cli.completions import ENVIRONMENT, SERVICE
 from heyamara_cli.config import SERVICES, SSM_PREFIX
 from heyamara_cli.helpers import require_aws_session, run
 from heyamara_cli.prompts import select
-from heyamara_cli.secret_files import UnsafeSecretFileError, ensure_private_dir, write_secret_text
+from heyamara_cli.secret_files import (
+    UnsafeSecretFileError,
+    ensure_private_dir,
+    write_secret_text,
+)
 
 ENVS = ["staging", "production"]
 
@@ -32,7 +37,7 @@ def _get_ssm_param(ssm_path: str, profile: str, region: str, environment: str = 
     )
 
 
-def _resolve(profile: str) -> tuple[str, str]:
+def _resolve(profile: Optional[str]) -> tuple[str, str]:
     """Resolve profile and region from args or user config."""
     p = profile or config.get("aws_profile")
     r = config.get("aws_region")
@@ -154,7 +159,7 @@ def pull_all(environment, output_dir, profile):
         click.echo(f"  {service}: {line_count} vars")
         success += 1
 
-    click.secho(f"\nPulled {success}/{len(SERVICES)} services to {output_dir}/", fg="green")
+    click.secho(f"\nPulled {success}/{len(SERVICES)} services to {output_dir}", fg="green")
 
 
 @env.command()

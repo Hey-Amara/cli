@@ -36,7 +36,10 @@ class EnvSecretOutputTests(unittest.TestCase):
             return self.runner.invoke(env_module.env, args)
 
     def _combined_output(self, result):
-        stderr = getattr(result, "stderr", "") or ""
+        try:
+            stderr = result.stderr or ""
+        except ValueError:
+            stderr = ""
         if stderr and stderr not in result.output:
             return result.output + stderr
         return result.output

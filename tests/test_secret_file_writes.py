@@ -9,7 +9,7 @@ from unittest import mock
 
 import heyamara_cli.secret_files as secret_files
 from heyamara_cli.commands.connect import _write_env_for
-from heyamara_cli.secret_files import UnsafeSecretFileError, write_secret_text
+from heyamara_cli.secret_files import UnsafeSecretFileError, ensure_private_dir, write_secret_text
 
 
 class SecretFileWriteTests(unittest.TestCase):
@@ -21,16 +21,47 @@ class SecretFileWriteTests(unittest.TestCase):
         except OSError as exc:
             self.skipTest(f"symlink creation unavailable: {exc}")
 
-    def test_write_secret_text_creates_private_file(self):
+    def test_ensure_private_dir_creates_private_parent_for_secret_write(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             output = Path(temp_dir) / "nested" / "secret.env"
 
+            ensure_private_dir(output.parent)
             write_secret_text(output, "TOKEN=secret", trailing_newline=True)
 
             self.assertEqual(output.read_text(), "TOKEN=secret\n")
             if os.name != "nt":
                 self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
                 self.assertEqual(stat.S_IMODE(output.parent.stat().st_mode), 0o700)
+
+    def test_ensure_private_dir_tolerates_concurrent_directory_creation(self):
+        if not secret_files._can_walk_with_dir_fd():
+            self.skipTest("directory fd creation path unavailable")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            target = Path(temp_dir) / "nested"
+            original_mkdir = secret_files.os.mkdir
+            simulated_race = {"done": False}
+
+            def racing_mkdir(path, mode=0o777, *, dir_fd=None):
+                if path == "nested" and dir_fd is not None and not simulated_race["done"]:
+                    simulated_race["done"] = True
+                    original_mkdir(path, mode, dir_fd=dir_fd)
+                    raise FileExistsError("simulated concurrent mkdir")
+                return original_mkdir(path, mode, dir_fd=dir_fd)
+
+            with mock.patch.object(secret_files.os, "mkdir", racing_mkdir):
+                ensure_private_dir(target)
+
+            self.assertTrue(target.is_dir())
+
+    def test_write_secret_text_requires_existing_parent_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "missing" / "secret.env"
+
+            with self.assertRaises(UnsafeSecretFileError):
+                write_secret_text(output, "TOKEN=secret", trailing_newline=True)
+
+            self.assertFalse(output.exists())
 
     def test_write_secret_text_replaces_existing_broad_file_privately(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -80,6 +111,48 @@ class SecretFileWriteTests(unittest.TestCase):
 
             self.assertEqual(output.read_text(), "ORIGINAL=1\n")
             self.assertFalse(list(Path(temp_dir).glob(".*.tmp")))
+
+    def test_write_secret_text_reports_post_replace_directory_sync_failure(self):
+        if not secret_files._can_walk_with_dir_fd() or not secret_files._SUPPORTS_RENAME_DIR_FD:
+            self.skipTest("directory fd rename path unavailable")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "secret.env"
+            output.write_text("ORIGINAL=1\n")
+            original_fsync = secret_files.os.fsync
+
+            def failing_directory_fsync(fd):
+                if stat.S_ISDIR(os.fstat(fd).st_mode):
+                    raise OSError("directory sync failed")
+                return original_fsync(fd)
+
+            with mock.patch.object(secret_files.os, "fsync", failing_directory_fsync):
+                with self.assertRaises(UnsafeSecretFileError) as cm:
+                    write_secret_text(output, "TOKEN=secret", trailing_newline=True)
+
+            self.assertIn("was written", str(cm.exception))
+            self.assertIn("directory sync failed", str(cm.exception))
+            self.assertEqual(output.read_text(), "TOKEN=secret\n")
+            self.assertFalse(list(Path(temp_dir).glob(".*.tmp")))
+
+    def test_windows_reparse_points_are_treated_as_unsafe_links(self):
+        class FakeReparsePoint:
+            def is_symlink(self):
+                return False
+
+            def is_junction(self):
+                return False
+
+            def lstat(self):
+                return type("Stat", (), {"st_file_attributes": 0x400})()
+
+        with mock.patch.object(secret_files.os, "name", "nt"), mock.patch.object(
+            secret_files.stat,
+            "FILE_ATTRIBUTE_REPARSE_POINT",
+            0x400,
+            create=True,
+        ):
+            self.assertTrue(secret_files._is_unsafe_link_component(FakeReparsePoint()))
 
     def test_write_secret_text_refuses_symlink_target(self):
         with tempfile.TemporaryDirectory() as temp_dir:

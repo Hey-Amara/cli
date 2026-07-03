@@ -38,7 +38,7 @@ DB_NAMES = {
 }
 
 
-def _resolve_profile(profile: str, region: Optional[str] = None) -> tuple[str, str]:
+def _resolve_profile(profile: Optional[str], region: Optional[str] = None) -> tuple[str, str]:
     """Resolve profile and region. region param overrides config."""
     p = profile or config.get("aws_profile")
     r = region or config.get("aws_region")
