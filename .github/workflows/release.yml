@@ -9,13 +9,20 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Read version from pyproject.toml
         id: ver
@@ -33,21 +40,44 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
 
-      - name: Check if tag already exists
-        id: tagcheck
+      - name: Check release state
+        id: state
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.ver.outputs.tag }}
         run: |
           set -euo pipefail
+          git fetch --force --tags origin
+
           if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
-            echo "Tag ${TAG} already exists, skipping release."
-            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${TAG} already exists."
+            tag_commit=$(git rev-list -n 1 "${TAG}")
+            if [ "${tag_commit}" != "${GITHUB_SHA}" ]; then
+              echo "Tag ${TAG} points to ${tag_commit}, not triggering commit ${GITHUB_SHA}." >&2
+              exit 1
+            fi
+            echo "tag_exists=true" >> "$GITHUB_OUTPUT"
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Tag ${TAG} does not exist yet."
+            echo "tag_exists=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Create tag and GitHub release
-        if: steps.tagcheck.outputs.exists == 'false'
+          release_error=$(mktemp "${RUNNER_TEMP:-/tmp}/gh-release-view.XXXXXX")
+          if gh api --silent "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" 2>"${release_error}"; then
+            echo "GitHub release ${TAG} already exists."
+            echo "release_exists=true" >> "$GITHUB_OUTPUT"
+          elif grep -q "HTTP 404" "${release_error}"; then
+            echo "GitHub release ${TAG} does not exist yet."
+            echo "release_exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Could not determine GitHub release state for ${TAG}:" >&2
+            cat "${release_error}" >&2
+            exit 1
+          fi
+          rm -f "${release_error}"
+
+      - name: Ensure release tag exists
+        if: steps.state.outputs.tag_exists == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.ver.outputs.tag }}
@@ -55,6 +85,26 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "${TAG}" -m "Release ${TAG}"
-          git push origin "${TAG}"
-          gh release create "${TAG}" --title "${TAG}" --generate-notes
+          git tag -a "${TAG}" "${GITHUB_SHA}" -m "Release ${TAG}"
+
+          askpass=$(mktemp "${RUNNER_TEMP:-/tmp}/git-askpass.XXXXXX")
+          trap 'rm -f "${askpass}"' EXIT
+          cat > "${askpass}" <<'EOF'
+          #!/usr/bin/env bash
+          case "$1" in
+            Username*) printf '%s\n' 'x-access-token' ;;
+            Password*) printf '%s\n' "${GH_TOKEN}" ;;
+            *) printf '\n' ;;
+          esac
+          EOF
+          chmod 700 "${askpass}"
+          GIT_ASKPASS="${askpass}" GIT_TERMINAL_PROMPT=0 git push origin "refs/tags/${TAG}"
+
+      - name: Create missing GitHub release
+        if: steps.state.outputs.release_exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "${TAG}" --repo "${GITHUB_REPOSITORY}" --title "${TAG}" --generate-notes --verify-tag
