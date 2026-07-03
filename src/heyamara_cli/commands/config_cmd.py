@@ -4,25 +4,26 @@ import os
 import click
 
 from heyamara_cli import config
+from heyamara_cli.config import SECRET_KEYS
 from heyamara_cli.prompts import select
+from heyamara_cli.secret_files import UnsafeSecretFileError
 
-SECRET_KEYS = {"grafana_token"}
 
-
-def _mask_secret(value: str) -> str:
+def _mask_secret(value: object, *, show_unset_marker: bool = False) -> str:
     """Return a stable masked display value for a configured secret."""
-    if not value:
-        return "(not set)"
-    if len(value) <= 4:
+    text = "" if value is None else str(value)
+    if not text:
+        return "(not set)" if show_unset_marker else ""
+    if len(text) <= 4:
         return "********"
-    return f"********{value[-4:]}"
+    return f"********{text[-4:]}"
 
 
-def _display_value(key: str, value: str) -> str:
+def _display_value(key: str, value: object, *, show_unset_marker: bool = False) -> str:
     """Display config values without leaking secret material."""
     if key in SECRET_KEYS:
-        return _mask_secret(value)
-    return value
+        return _mask_secret(value, show_unset_marker=show_unset_marker)
+    return "" if value is None else str(value)
 
 
 def _list_aws_profiles() -> list[str]:
@@ -98,7 +99,11 @@ def set_config(key, value):
 
     cfg = config.load_user_config()
     cfg[key] = value
-    config.save_user_config(cfg)
+    try:
+        config.save_user_config(cfg)
+    except UnsafeSecretFileError as exc:
+        click.secho(str(exc), fg="red")
+        raise SystemExit(1) from exc
     click.secho(f"{key} = {_display_value(key, value)}", fg="green")
 
 
@@ -111,6 +116,7 @@ def get_config(key):
     Examples:
       heyamara config get              # Show all
       heyamara config get aws_profile  # Show one
+      heyamara config get grafana_token  # Show masked token
     """
     cfg = config.load_user_config()
     if key:
@@ -122,7 +128,7 @@ def get_config(key):
     else:
         click.secho(f"Config file: {config.CONFIG_FILE}", fg="cyan")
         for k, v in sorted(cfg.items()):
-            display_v = _display_value(k, v)
+            display_v = _display_value(k, v, show_unset_marker=True)
             default = ""
             if k not in SECRET_KEYS and k in config.DEFAULTS and v == config.DEFAULTS[k]:
                 default = " (default)"

@@ -8,6 +8,8 @@ from heyamara_cli.secret_files import ensure_private_dir, write_secret_text
 CONFIG_DIR = Path.home() / ".heyamara"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
+SECRET_KEYS = {"grafana_token"}
+
 DEFAULTS = {
     "aws_profile": "default",
     "aws_region": "ap-southeast-2",

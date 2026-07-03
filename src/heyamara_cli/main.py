@@ -14,6 +14,7 @@ from heyamara_cli.commands.login import login
 from heyamara_cli.commands.search import search
 from heyamara_cli.commands.setup import setup
 from heyamara_cli.commands.update import update
+from heyamara_cli.secret_files import UnsafeSecretFileError
 
 
 # ---- Command categories for help display ------------------------------------
@@ -205,7 +206,11 @@ def switch(profile):
     cfg = config.load_user_config()
     old = cfg.get("aws_profile", config.DEFAULTS["aws_profile"])
     cfg["aws_profile"] = profile
-    config.save_user_config(cfg)
+    try:
+        config.save_user_config(cfg)
+    except UnsafeSecretFileError as exc:
+        click.secho(str(exc), fg="red")
+        raise SystemExit(1) from exc
     click.secho(f"Switched: {old} -> {profile}", fg="green")
 
 

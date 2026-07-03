@@ -9,7 +9,7 @@ from heyamara_cli.completions import ENVIRONMENT, SERVICE
 from heyamara_cli.config import SERVICES, SSM_PREFIX
 from heyamara_cli.helpers import require_aws_session, run
 from heyamara_cli.prompts import select
-from heyamara_cli.secret_files import UnsafeSecretFileError, write_secret_text
+from heyamara_cli.secret_files import UnsafeSecretFileError, ensure_private_dir, write_secret_text
 
 ENVS = ["staging", "production"]
 
@@ -130,7 +130,11 @@ def pull_all(environment, output_dir, profile):
 
     profile, region = _resolve(profile)
     require_aws_session(profile)
-    os.makedirs(output_dir, mode=0o700, exist_ok=True)
+    try:
+        ensure_private_dir(output_dir)
+    except UnsafeSecretFileError as exc:
+        click.secho(str(exc), fg="red")
+        raise SystemExit(1) from exc
 
     success = 0
     for service in SERVICES:
