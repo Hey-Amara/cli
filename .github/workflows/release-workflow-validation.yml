@@ -6,6 +6,7 @@ on:
       - .github/workflows/release.yml
       - .github/workflows/release-workflow-validation.yml
       - .github/tests/release-workflow-state-machine.py
+      - .github/tests/fixtures/release-workflow-legacy.yml
       - pyproject.toml
 
 permissions:
