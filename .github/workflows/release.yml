@@ -42,7 +42,13 @@ jobs:
 
           version_changed=true
           if [ -n "${BASE_SHA:-}" ] && ! echo "$BASE_SHA" | grep -Eq '^0+$'; then
-            previous_version=$(git show "${BASE_SHA}:pyproject.toml" 2>/dev/null | grep -E '^version[[:space:]]*=' | head -1 | sed -E 's/.*"([^"]+)".*/\1/' || true)
+            previous_version=$(
+              git show "${BASE_SHA}:pyproject.toml" 2>/dev/null \
+                | grep -E '^version[[:space:]]*=' \
+                | head -1 \
+                | sed -E 's/.*"([^"]+)".*/\1/' \
+                || true
+            )
             if [ -n "$previous_version" ] && [ "$previous_version" = "$version" ]; then
               echo "Version remains ${version}; skipping release reconciliation."
               version_changed=false

@@ -3,7 +3,9 @@
 
 This executes the workflow's shell blocks in a temporary local Git repository
 with a fake `gh` executable. It proves the important release states while
-keeping all tag/release side effects inside the temp directory.
+keeping all tag/release side effects inside the temp directory. The extracted
+workflow shell runs with a temporary HOME, a strict environment allowlist, and
+only the local tools needed by the release steps on PATH.
 """
 
 from __future__ import annotations
@@ -18,6 +20,18 @@ from pathlib import Path
 WORKFLOW = Path(os.environ.get("WORKFLOW_FILE", ".github/workflows/release.yml"))
 BASE_REF = os.environ.get("BASE_REF", "origin/main")
 TAG = os.environ.get("TAG", "v1.2.3")
+HARNESS_TOOLS = (
+    "awk",
+    "bash",
+    "cat",
+    "chmod",
+    "git",
+    "grep",
+    "head",
+    "mktemp",
+    "rm",
+    "sed",
+)
 
 
 def extract_step_run(workflow: Path, step_name: str) -> str:
@@ -54,7 +68,47 @@ def extract_step_run(workflow: Path, step_name: str) -> str:
     raise AssertionError(f"could not find run block for step {step_name!r}")
 
 
-def run(cmd: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def extract_step_if(workflow: Path, step_name: str) -> str | None:
+    lines = workflow.read_text().splitlines()
+    needle = f"- name: {step_name}"
+    for index, line in enumerate(lines):
+        if line.strip() != needle:
+            continue
+
+        for candidate in range(index + 1, len(lines)):
+            stripped = lines[candidate].strip()
+            if stripped.startswith("- name: "):
+                break
+            if stripped.startswith("if: "):
+                return stripped.removeprefix("if: ").strip()
+        return None
+
+    raise AssertionError(f"could not find step {step_name!r}")
+
+
+def assert_workflow_guards(workflow: Path) -> None:
+    expected = {
+        "Check tag and GitHub release state": "steps.ver.outputs.version_changed == 'true'",
+        "Create and push missing release tag": (
+            "steps.ver.outputs.version_changed == 'true' && "
+            "steps.state.outputs.tag_exists == 'false'"
+        ),
+        "Create missing GitHub release": (
+            "steps.ver.outputs.version_changed == 'true' && "
+            "steps.state.outputs.release_exists == 'false'"
+        ),
+    }
+    for step_name, guard in expected.items():
+        assert_eq(extract_step_if(workflow, step_name), guard, f"{step_name} if guard")
+    print("workflow_if_guards: ok")
+
+
+def run(
+    cmd: list[str],
+    *,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, cwd=cwd, env=env, text=True, capture_output=True, check=True)
 
 
@@ -139,7 +193,8 @@ if [[ "${1:-}" == "release" && "${2:-}" == "create" ]]; then
     echo "release already exists" >&2
     exit 1
   fi
-  if [[ " $* " == *" --verify-tag "* ]] && ! git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+  if [[ " $* " == *" --verify-tag "* ]] && \
+    ! git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
     echo "tag missing remotely" >&2
     exit 1
   fi
@@ -152,6 +207,16 @@ exit 2
 '''
     )
     path.chmod(0o755)
+
+
+def install_tool_links(bin_dir: Path) -> None:
+    for tool in HARNESS_TOOLS:
+        target = shutil.which(tool)
+        if target is None:
+            raise AssertionError(f"required test tool {tool!r} is not available")
+        link = bin_dir / tool
+        link.unlink(missing_ok=True)
+        link.symlink_to(target)
 
 
 def setup_repo(root: Path) -> tuple[Path, str]:
@@ -170,22 +235,24 @@ def setup_repo(root: Path) -> tuple[Path, str]:
 
 
 def base_env(root: Path, output: Path, sha: str) -> dict[str, str]:
-    env = os.environ.copy()
-    env.update(
-        {
-            "PATH": f"{root / 'bin'}{os.pathsep}{env['PATH']}",
-            "GH_TOKEN": "fake-token",
-            "GITHUB_REPOSITORY": "Hey-Amara/cli",
-            "GITHUB_OUTPUT": str(output),
-            "GITHUB_SHA": sha,
-            "RUNNER_TEMP": str(root),
-            "FAKE_RELEASES_DIR": str(root / "releases"),
-            "FAKE_COMMAND_LOG": str(root / "commands.log"),
-            "TAG": TAG,
-        }
-    )
-    env.pop("FAKE_GH_API", None)
-    return env
+    return {
+        "PATH": str(root / "bin"),
+        "HOME": str(root / "home"),
+        "XDG_CONFIG_HOME": str(root / "xdg-config"),
+        "TMPDIR": str(root),
+        "LANG": "C",
+        "LC_ALL": "C",
+        "GIT_CONFIG_GLOBAL": str(root / "gitconfig"),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GH_TOKEN": "fake-token",
+        "GITHUB_REPOSITORY": "Hey-Amara/cli",
+        "GITHUB_OUTPUT": str(output),
+        "GITHUB_SHA": sha,
+        "RUNNER_TEMP": str(root),
+        "FAKE_RELEASES_DIR": str(root / "releases"),
+        "FAKE_COMMAND_LOG": str(root / "commands.log"),
+        "TAG": TAG,
+    }
 
 
 def command_log(root: Path) -> str:
@@ -193,7 +260,15 @@ def command_log(root: Path) -> str:
     return path.read_text() if path.exists() else ""
 
 
-def run_release_case(root: Path, work: Path, scripts: dict[str, str], name: str, tag_present: bool, release_present: bool, sha: str) -> None:
+def run_release_case(
+    root: Path,
+    work: Path,
+    scripts: dict[str, str],
+    name: str,
+    tag_present: bool,
+    release_present: bool,
+    sha: str,
+) -> None:
     releases = root / "releases"
     reset_tag(work)
     shutil.rmtree(releases)
@@ -239,10 +314,23 @@ def run_release_case(root: Path, work: Path, scripts: dict[str, str], name: str,
     if name == "existing_tag_missing_release":
         assert_contains(command_log(root), "--verify-tag", f"{name} should verify tag")
 
-    print(f"{name}: tag_exists={values['tag_exists']} release_exists={values['release_exists']} tag_action={tag_action} release_action={release_action}")
+    print(
+        f"{name}: tag_exists={values['tag_exists']} "
+        f"release_exists={values['release_exists']} "
+        f"tag_action={tag_action} "
+        f"release_action={release_action}"
+    )
 
 
-def run_version_case(root: Path, work: Path, version_script: str, name: str, base_sha: str, head_sha: str, expected: str) -> None:
+def run_version_case(
+    root: Path,
+    work: Path,
+    version_script: str,
+    name: str,
+    base_sha: str,
+    head_sha: str,
+    expected: str,
+) -> None:
     output = root / f"{name}.outputs"
     output.unlink(missing_ok=True)
     env = base_env(root, output, head_sha)
@@ -255,7 +343,14 @@ def run_version_case(root: Path, work: Path, version_script: str, name: str, bas
     print(f"{name}: version_changed={actual}")
 
 
-def run_failure_case(root: Path, work: Path, state_script: str, name: str, original_sha: str, current_sha: str) -> None:
+def run_failure_case(
+    root: Path,
+    work: Path,
+    state_script: str,
+    name: str,
+    original_sha: str,
+    current_sha: str,
+) -> None:
     reset_tag(work)
     shutil.rmtree(root / "releases")
     (root / "releases").mkdir()
@@ -284,7 +379,11 @@ def run_base_red_check(root: Path, work: Path, original_sha: str) -> None:
         capture_output=True,
     )
     if show.returncode:
-        print(f"base_workflow_existing_tag_missing_release: skipped (BASE_REF {BASE_REF} unavailable)")
+        message = f"base workflow unavailable for BASE_REF {BASE_REF}"
+        require_base_ref = os.environ.get("REQUIRE_BASE_REF") == "1"
+        if require_base_ref or os.environ.get("GITHUB_ACTIONS") == "true":
+            raise AssertionError(message)
+        print(f"base_workflow_existing_tag_missing_release: skipped ({message})")
         return
     base_workflow.write_text(show.stdout)
     tagcheck = extract_step_run(base_workflow, "Check if tag already exists")
@@ -302,12 +401,17 @@ def run_base_red_check(root: Path, work: Path, original_sha: str) -> None:
         raise AssertionError(f"base tag check failed\n{result.stderr}")
     if output_values(output).get("exists") == "false":
         run_step(release, cwd=work, env=env)
-    assert_eq(command_log(root).count("release_create"), 0, "base workflow should skip release creation when tag exists")
+    assert_eq(
+        command_log(root).count("release_create"),
+        0,
+        "base workflow should skip release creation when tag exists",
+    )
     assert_eq((root / "releases" / TAG).exists(), False, "base workflow should leave release missing")
     print("base_workflow_existing_tag_missing_release: failed_as_expected=true")
 
 
 def main() -> None:
+    assert_workflow_guards(WORKFLOW)
     scripts = {
         "version": extract_step_run(WORKFLOW, "Read version from pyproject.toml"),
         "state": extract_step_run(WORKFLOW, "Check tag and GitHub release state"),
@@ -318,7 +422,11 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="release-workflow-test.") as tmp:
         root = Path(tmp)
         (root / "bin").mkdir()
+        (root / "home").mkdir()
+        (root / "xdg-config").mkdir()
         (root / "releases").mkdir()
+        (root / "gitconfig").write_text("")
+        install_tool_links(root / "bin")
         write_fake_gh(root / "bin" / "gh")
         work, original_sha = setup_repo(root)
 
@@ -330,7 +438,15 @@ def main() -> None:
         git(work, "add", "pyproject.toml")
         git(work, "commit", "-m", "non-version-change")
         same_version_sha = git(work, "rev-parse", "HEAD").stdout.strip()
-        run_version_case(root, work, scripts["version"], "same_version_pyproject_change", original_sha, same_version_sha, "false")
+        run_version_case(
+            root,
+            work,
+            scripts["version"],
+            "same_version_pyproject_change",
+            original_sha,
+            same_version_sha,
+            "false",
+        )
 
         (work / "pyproject.toml").write_text('version = "1.2.4"\n# version bump\n')
         git(work, "add", "pyproject.toml")

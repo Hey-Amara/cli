@@ -1,0 +1,45 @@
+name: Release workflow validation
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - .github/workflows/release-workflow-validation.yml
+      - .github/tests/release-workflow-state-machine.py
+      - pyproject.toml
+
+permissions:
+  contents: read
+
+jobs:
+  validate-release-workflow:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch base workflow
+        env:
+          BASE_REF: ${{ github.base_ref || 'main' }}
+        run: |
+          set -euo pipefail
+          git fetch origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+
+      - name: Run actionlint
+        run: |
+          set -euo pipefail
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 \
+            .github/workflows/release.yml \
+            .github/workflows/release-workflow-validation.yml
+
+      - name: Validate release workflow state machine
+        env:
+          BASE_REF: origin/${{ github.base_ref || 'main' }}
+          REQUIRE_BASE_REF: "1"
+        run: |
+          set -euo pipefail
+          python3 .github/tests/release-workflow-state-machine.py

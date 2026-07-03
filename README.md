@@ -461,6 +461,13 @@ heyamara --help
 heyamara -v logs staging ats-backend --since 1m --no-follow   # -v for debug output
 ```
 
+For release workflow changes, run the local state-machine harness before
+opening a PR:
+
+```bash
+python3 .github/tests/release-workflow-state-machine.py
+```
+
 ### Releasing
 
 ```bash
@@ -476,13 +483,19 @@ The release workflow only runs the tag/release reconciliation when the
 `version =` line changes. If a release run pushes the tag but fails before the
 GitHub release is created, rerun the failed workflow for the same commit; it
 will reuse the existing tag after verifying it points at that commit and create
-the missing release.
+the missing release. A later `pyproject.toml` edit that leaves the version
+unchanged will not recreate a missing release.
 
-For manual recovery, verify the tag already exists and points at the intended
-commit, then create the release without allowing `gh` to create a tag implicitly:
+For manual recovery, prefer rerunning the failed workflow first. If manual
+recovery is still needed, verify the tag already exists and points at the
+intended commit, then create the release without allowing `gh` to create a tag
+implicitly:
 
 ```bash
-gh release create v1.6.0 --title "v1.6.0" --generate-notes --verify-tag
+git fetch --tags origin
+git rev-list -n 1 vX.Y.Z
+git rev-parse <expected-commit>
+gh release create vX.Y.Z --repo Hey-Amara/cli --title "vX.Y.Z" --generate-notes --verify-tag
 ```
 
 ## Troubleshooting
