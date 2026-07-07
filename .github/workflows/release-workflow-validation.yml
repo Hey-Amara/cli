@@ -1,0 +1,36 @@
+name: Release workflow validation
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - .github/workflows/release-workflow-validation.yml
+      - .github/tests/**
+      - pyproject.toml
+
+permissions:
+  contents: read
+
+jobs:
+  validate-release-workflow:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Run actionlint
+        run: |
+          set -euo pipefail
+          shellcheck --version
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 \
+            .github/workflows/release.yml \
+            .github/workflows/release-workflow-validation.yml
+
+      - name: Validate release workflow state machine
+        run: |
+          set -euo pipefail
+          python3 .github/tests/release-workflow-state-machine.py

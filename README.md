@@ -461,16 +461,50 @@ heyamara --help
 heyamara -v logs staging ats-backend --since 1m --no-follow   # -v for debug output
 ```
 
+For release workflow, release harness or fixture, or release-related
+`pyproject.toml` changes, run the same local checks as the PR validation
+workflow:
+
+```bash
+python3 .github/tests/release-workflow-state-machine.py
+shellcheck --version
+go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 \
+  .github/workflows/release.yml \
+  .github/workflows/release-workflow-validation.yml
+```
+
 ### Releasing
 
 ```bash
 # 1. Bump version in pyproject.toml
 # 2. Commit and push to main
-# 3. Create a GitHub release tag:
-gh release create v1.6.0 --title "v1.6.0" --generate-notes
+# 3. GitHub Actions creates the vX.Y.Z tag and GitHub release
 
 # Existing users update with:
 heyamara update
+```
+
+The release workflow only runs the tag/release reconciliation when the
+`version =` line changes. If a release run pushes the tag but fails before the
+GitHub release is created, rerun the failed workflow for the same commit; it
+will reuse the existing tag after verifying it points at that commit and create
+the missing release. A later `pyproject.toml` edit that leaves the version
+unchanged will not recreate a missing release.
+
+For manual recovery, prefer rerunning the failed workflow first. If manual
+recovery is still needed, verify the tag already exists and points at the
+intended commit, then create the release without allowing `gh` to create a tag
+implicitly:
+
+```bash
+set -euo pipefail
+# Check out the intended release commit first, then set this to the release tag.
+tag=vX.Y.Z
+expected_commit=$(git rev-parse HEAD)
+git fetch --tags origin
+tag_commit=$(git rev-list -n 1 "$tag")
+test "$tag_commit" = "$expected_commit"
+gh release create "$tag" --repo Hey-Amara/cli --title "$tag" --generate-notes --verify-tag
 ```
 
 ## Troubleshooting
