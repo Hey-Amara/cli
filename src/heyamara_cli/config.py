@@ -1,11 +1,14 @@
 import json
-import os
 from pathlib import Path
+
+from heyamara_cli.secret_files import ensure_private_dir, write_secret_text
 
 # ---- User config file -------------------------------------------------------
 
 CONFIG_DIR = Path.home() / ".heyamara"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+
+SECRET_KEYS = {"grafana_token"}
 
 DEFAULTS = {
     "aws_profile": "default",
@@ -21,7 +24,9 @@ def load_user_config() -> dict:
     if CONFIG_FILE.exists():
         try:
             with open(CONFIG_FILE) as f:
-                config.update(json.load(f))
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                config.update(loaded)
         except (json.JSONDecodeError, OSError):
             pass
     return config
@@ -29,9 +34,8 @@ def load_user_config() -> dict:
 
 def save_user_config(config: dict) -> None:
     """Save user config to ~/.heyamara/config.json."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=2)
+    ensure_private_dir(CONFIG_DIR)
+    write_secret_text(CONFIG_FILE, json.dumps(config, indent=2), trailing_newline=True)
 
 
 def get(key: str) -> str:
@@ -55,7 +59,8 @@ def get(key: str) -> str:
         env_val = environ.get(env_var)
         if env_val:
             return env_val
-    return load_user_config().get(key, DEFAULTS.get(key, ""))
+    value = load_user_config().get(key, DEFAULTS.get(key, ""))
+    return "" if value is None else str(value)
 
 
 # ---- Static config -----------------------------------------------------------

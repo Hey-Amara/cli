@@ -1,6 +1,7 @@
 import base64
 import gzip
 import os
+from typing import Optional
 
 import click
 
@@ -9,6 +10,11 @@ from heyamara_cli.completions import ENVIRONMENT, SERVICE
 from heyamara_cli.config import SERVICES, SSM_PREFIX
 from heyamara_cli.helpers import require_aws_session, run
 from heyamara_cli.prompts import select
+from heyamara_cli.secret_files import (
+    UnsafeSecretFileError,
+    ensure_private_dir,
+    write_secret_text,
+)
 
 ENVS = ["staging", "production"]
 
@@ -31,7 +37,7 @@ def _get_ssm_param(ssm_path: str, profile: str, region: str, environment: str = 
     )
 
 
-def _resolve(profile: str) -> tuple[str, str]:
+def _resolve(profile: Optional[str]) -> tuple[str, str]:
     """Resolve profile and region from args or user config."""
     p = profile or config.get("aws_profile")
     r = config.get("aws_region")
@@ -45,6 +51,15 @@ def _decode(raw: str) -> str:
         return gzip.decompress(decoded).decode("utf-8")
     except Exception:
         return raw
+
+
+def _write_secret_env_file(path: str, content: str) -> None:
+    """Write downloaded env content without broad default file permissions."""
+    try:
+        write_secret_text(path, content, trailing_newline=True)
+    except UnsafeSecretFileError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        raise SystemExit(1) from exc
 
 
 @click.group()
@@ -95,10 +110,7 @@ def pull(service, environment, output, profile):
     env_content = _decode(result.stdout.strip())
 
     out_path = output or f"{service}.{env_name}.env"
-    with open(out_path, "w") as f:
-        f.write(env_content)
-        if not env_content.endswith("\n"):
-            f.write("\n")
+    _write_secret_env_file(out_path, env_content)
 
     line_count = len([line for line in env_content.splitlines() if line.strip()])
     click.secho(f"Written {out_path} ({line_count} vars)", fg="green")
@@ -123,7 +135,11 @@ def pull_all(environment, output_dir, profile):
 
     profile, region = _resolve(profile)
     require_aws_session(profile)
-    os.makedirs(output_dir, exist_ok=True)
+    try:
+        ensure_private_dir(output_dir, chmod_existing=False)
+    except UnsafeSecretFileError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        raise SystemExit(1) from exc
 
     success = 0
     for service in SERVICES:
@@ -137,16 +153,13 @@ def pull_all(environment, output_dir, profile):
         env_content = _decode(result.stdout.strip())
 
         out_path = os.path.join(output_dir, f"{service}.{env_name}.env")
-        with open(out_path, "w") as f:
-            f.write(env_content)
-            if not env_content.endswith("\n"):
-                f.write("\n")
+        _write_secret_env_file(out_path, env_content)
 
         line_count = len([line for line in env_content.splitlines() if line.strip()])
         click.echo(f"  {service}: {line_count} vars")
         success += 1
 
-    click.secho(f"\nPulled {success}/{len(SERVICES)} services to {output_dir}/", fg="green")
+    click.secho(f"\nPulled {success}/{len(SERVICES)} services to {output_dir}", fg="green")
 
 
 @env.command()

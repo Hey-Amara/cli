@@ -7,6 +7,7 @@ import shutil
 import signal
 import subprocess
 import urllib.parse
+from typing import Optional
 
 import click
 
@@ -15,6 +16,7 @@ from heyamara_cli.completions import ENVIRONMENT
 from heyamara_cli.config import CLUSTERS, NAMESPACES, SERVICES as APP_SERVICES, SSM_PREFIX
 from heyamara_cli.helpers import check_port_free, debug, detect_iam_role, require_aws_session, run
 from heyamara_cli.prompts import select
+from heyamara_cli.secret_files import UnsafeSecretFileError, write_secret_text
 from heyamara_cli.tunnel import (
     CONNECT_TIMEOUT_SECONDS,
     build_database_url,
@@ -36,7 +38,7 @@ DB_NAMES = {
 }
 
 
-def _resolve_profile(profile: str, region: str | None = None) -> tuple[str, str]:
+def _resolve_profile(profile: Optional[str], region: Optional[str] = None) -> tuple[str, str]:
     """Resolve profile and region. region param overrides config."""
     p = profile or config.get("aws_profile")
     r = region or config.get("aws_region")
@@ -374,7 +376,7 @@ def _fetch_service_env(service: str, environment: str, profile: str, region: str
         return raw
 
 
-def _rewrite_db_url_host(url: str, new_host: str, new_port: int, db_name: str | None = None) -> str:
+def _rewrite_db_url_host(url: str, new_host: str, new_port: int, db_name: Optional[str] = None) -> str:
     """Rewrite a postgres URL to point at new_host:new_port, preserve user:password.
 
     Preserves the original user:password portion verbatim so an already
@@ -398,7 +400,7 @@ def _rewrite_urls_in_env(
     keys: set[str],
     new_host: str,
     new_port: int,
-    db_name: str | None = None,
+    db_name: Optional[str] = None,
 ) -> tuple[str, list[str]]:
     """Rewrite the host:port of any env var whose key is in `keys`.
 
@@ -438,13 +440,14 @@ def _write_env_for(
     rewritten_keys: list[str],
     service: str,
     local_port: int,
-    extra_hint: str | None = None,
+    extra_hint: Optional[str] = None,
 ) -> None:
     """Write the rewritten env file and print a status block."""
-    with open(output, "w") as f:
-        f.write(env_content)
-        if not env_content.endswith("\n"):
-            f.write("\n")
+    try:
+        write_secret_text(output, env_content, trailing_newline=True)
+    except UnsafeSecretFileError as exc:
+        click.secho(str(exc), fg="red", err=True)
+        raise SystemExit(1) from exc
 
     non_empty = [
         ln for ln in env_content.splitlines()
