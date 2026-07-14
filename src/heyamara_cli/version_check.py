@@ -5,12 +5,12 @@ from __future__ import annotations
 import importlib.metadata
 import json
 import os
-import subprocess
-import shutil
 import time
 from pathlib import Path
 
 import click
+
+from heyamara_cli.release_version import fetch_latest_release_version
 
 CACHE_DIR = Path.home() / ".heyamara"
 CACHE_FILE = CACHE_DIR / ".update-check"
@@ -38,35 +38,7 @@ def _write_cache(latest: str) -> None:
 
 def _fetch_latest_version() -> str:
     """Fetch latest release tag from GitHub (quick, silent)."""
-    try:
-        if shutil.which("gh"):
-            result = subprocess.run(
-                ["gh", "release", "view", "--repo", REPO, "--json", "tagName", "--jq", ".tagName"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                return result.stdout.strip().lstrip("v")
-    except (subprocess.TimeoutExpired, OSError):
-        pass
-
-    try:
-        result = subprocess.run(
-            ["git", "ls-remote", "--tags", "--sort=-v:refname", f"https://github.com/{REPO}.git"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            for line in result.stdout.strip().splitlines():
-                ref = line.split("refs/tags/")[-1]
-                if ref.startswith("v"):
-                    return ref.lstrip("v")
-    except (subprocess.TimeoutExpired, OSError):
-        pass
-
-    return ""
+    return fetch_latest_release_version(REPO, timeout=5)
 
 
 def check_and_notify() -> None:

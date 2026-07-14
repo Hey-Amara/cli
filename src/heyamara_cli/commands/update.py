@@ -9,34 +9,16 @@ from pathlib import Path
 
 import click
 
+from heyamara_cli.release_version import fetch_latest_release_version
+
 
 REPO = "Hey-Amara/cli"
 GIT_URL = f"git+https://github.com/{REPO}.git"
 
 
 def _get_latest_version() -> str:
-    """Fetch latest release tag from GitHub via gh CLI or API."""
-    if shutil.which("gh"):
-        result = subprocess.run(
-            ["gh", "release", "view", "--repo", REPO, "--json", "tagName", "--jq", ".tagName"],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip().lstrip("v")
-
-    result = subprocess.run(
-        ["git", "ls-remote", "--tags", "--sort=-v:refname", f"https://github.com/{REPO}.git"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode == 0 and result.stdout.strip():
-        for line in result.stdout.strip().splitlines():
-            ref = line.split("refs/tags/")[-1]
-            if ref.startswith("v"):
-                return ref.lstrip("v")
-
-    return ""
+    """Fetch the latest canonical release version."""
+    return fetch_latest_release_version(REPO)
 
 
 _VERSION_RE = re.compile(r"(\d+\.\d+\.\d+(?:[\w.+-]*)?)")
