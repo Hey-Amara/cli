@@ -62,6 +62,57 @@ class ReleaseVersionTests(unittest.TestCase):
             with self.subTest(tag=invalid):
                 self.assertEqual(canonical_release_version(invalid), "")
 
+    def test_canonical_version_rejects_non_canonical_leading_zero_components(self):
+        # Leading zeros are not canonical SemVer; accepting them let a bogus
+        # `v010.0.0` parse to (10, 0, 0) and outrank a real `v1.9.0`.
+        for invalid in ("v01.2.3", "v1.02.3", "v1.2.03", "v010.0.0"):
+            with self.subTest(tag=invalid):
+                self.assertEqual(canonical_release_version(invalid), "")
+
+    def test_parser_ignores_leading_zero_tags_and_keeps_the_canonical_max(self):
+        output = "\n".join(
+            [
+                "aaaaaaaa\trefs/tags/v1.9.0",
+                "bbbbbbbb\trefs/tags/v010.0.0",
+            ]
+        )
+
+        self.assertEqual(parse_git_tag_output(output), "1.9.0")
+
+    def test_canonical_version_rejects_unicode_digit_tags(self):
+        # `[0-9]` (not `\d`) must keep Unicode decimal digits out; int() would
+        # otherwise happily parse them into a bogus version tuple.
+        self.assertEqual(canonical_release_version("v١.٢.٣"), "")
+        self.assertEqual(parse_git_tag_output("aaaaaaaa\trefs/tags/v١.٢.٣"), "")
+
+    def test_parser_does_not_crash_on_pathologically_long_numeric_tag(self):
+        # A >4300-digit numeric component would blow int()'s conversion limit and
+        # crash the resolver; the bounded pattern must simply skip such a tag.
+        huge = "v" + ("9" * 5000) + ".0.0"
+        output = "\n".join(
+            [
+                f"aaaaaaaa\trefs/tags/{huge}",
+                "bbbbbbbb\trefs/tags/v1.7.0",
+            ]
+        )
+
+        self.assertEqual(parse_git_tag_output(output), "1.7.0")
+        self.assertEqual(canonical_release_version(huge), "")
+
+    @mock.patch("heyamara_cli.release_version.shutil.which", return_value=None)
+    @mock.patch("heyamara_cli.release_version.subprocess.run")
+    def test_fetch_fails_soft_to_empty_on_pathologically_long_tag(
+        self, run_mock, _which_mock
+    ):
+        # The public entry point must degrade to "" (no update offered), never
+        # propagate a ValueError out of a malformed upstream tag.
+        huge = "v" + ("9" * 5000) + ".0.0"
+        run_mock.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=f"aaaaaaaa\trefs/tags/{huge}\n", stderr=""
+        )
+
+        self.assertEqual(fetch_latest_release_version("Hey-Amara/cli", timeout=5), "")
+
     def test_parser_skips_malformed_and_non_version_tags(self):
         output = "\n".join(
             [

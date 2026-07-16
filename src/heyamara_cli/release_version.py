@@ -8,7 +8,14 @@ import subprocess
 from typing import Optional
 
 
-_STABLE_VERSION_TAG_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+# Canonical stable release tags only: `vMAJOR.MINOR.PATCH`. Each component is an
+# ASCII, leading-zero-free integer, bounded in length. `[0-9]` (not `\d`) keeps
+# Unicode digits like `v١.٢.٣` out; `0|[1-9][0-9]{0,8}` rejects non-canonical
+# leading zeros (`v01.2.3`) and caps the digit run so a pathological tag can't
+# feed a multi-thousand-digit string into int() and crash the resolver.
+_STABLE_VERSION_TAG_RE = re.compile(
+    r"^v(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$"
+)
 
 
 def canonical_release_version(tag: str) -> str:
