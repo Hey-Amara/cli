@@ -32,6 +32,7 @@ from heyamara_cli.helpers import (
 )
 from heyamara_cli.prompts import select
 from heyamara_cli.tunnel import (
+    CONNECT_TIMEOUT_SECONDS,
     build_database_url,
     generate_rds_auth_token,
     open_tunnel_and_probe,
@@ -202,6 +203,34 @@ def _generate_token_and_url(
     )
 
 
+def _psql_command_and_env(
+    *,
+    token: str,
+    db_user: str,
+    dbname: str,
+    local_port: int,
+) -> tuple[list[str], dict[str, str]]:
+    """Build a psql invocation without placing the IAM token in its arguments."""
+    child_env = os.environ.copy()
+    child_env["PGPASSWORD"] = token
+    child_env["PGSSLMODE"] = "require"
+    child_env["PGCONNECT_TIMEOUT"] = str(int(CONNECT_TIMEOUT_SECONDS))
+    child_env["PGAPPNAME"] = "heyamara-cli"
+
+    command = [
+        "psql",
+        "-h",
+        "127.0.0.1",
+        "-p",
+        str(local_port),
+        "-U",
+        db_user,
+        "-d",
+        dbname,
+    ]
+    return command, child_env
+
+
 # --------------------------------------------------------------------------
 # Click group
 # --------------------------------------------------------------------------
@@ -267,14 +296,18 @@ def psql_cmd(environment, service, db_user, db_name, local_port, profile, region
     open_tunnel_and_probe(instance_id, rds_host, rds_port, local_port, profile, region)
 
     click.echo(f"Generating IAM auth token for user '{resolved_user}'...")
-    database_url = _generate_token_and_url(
+    token = generate_rds_auth_token(
+        rds_host,
+        rds_port,
+        resolved_user,
+        profile,
+        region,
+    )
+    psql_command, child_env = _psql_command_and_env(
+        token=token,
         db_user=resolved_user,
         dbname=resolved_db,
-        rds_host=rds_host,
-        rds_port=rds_port,
         local_port=local_port,
-        profile=profile,
-        region=region,
     )
 
     click.secho(
@@ -284,7 +317,7 @@ def psql_cmd(environment, service, db_user, db_name, local_port, profile, region
     )
 
     # Hand off to psql. When psql exits, atexit handler closes the tunnel.
-    proc = subprocess.run(["psql", database_url])
+    proc = subprocess.run(psql_command, env=child_env)
     sys.exit(proc.returncode)
 
 
@@ -561,16 +594,15 @@ def doctor(environment, service, db_user, profile, region):
         click.secho("\nAll reachable steps passed.", fg="green", bold=True)
         return
 
-    database_url = build_database_url(
-        user=resolved_user,
-        password=token,
-        host="localhost",
-        port=local_port,
+    psql_command, child_env = _psql_command_and_env(
+        token=token,
+        db_user=resolved_user,
         dbname=default_db,
-        connect_timeout=10,
+        local_port=local_port,
     )
     result = subprocess.run(
-        ["psql", database_url, "-c", "SELECT current_user, current_database()"],
+        [*psql_command, "-c", "SELECT current_user, current_database()"],
+        env=child_env,
         capture_output=True,
         text=True,
     )
