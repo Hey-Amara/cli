@@ -28,6 +28,10 @@ LOKI_DATASOURCE_UIDS = {
 }
 DEFAULT_LOKI_DATASOURCE_UID = "loki-staging"
 
+# Grafana/Loki read timeout. The staging reader does cold S3-backed reads, so a valid query can take
+# well over the old 30s and surface as a false "timed out".
+LOKI_HTTP_TIMEOUT_SECONDS = 120
+
 FOLLOW_POLL_INTERVAL = 3  # seconds between polls
 FOLLOW_LOOKBACK_NS = 10_000_000_000  # 10s overlap in nanoseconds
 
@@ -91,7 +95,9 @@ def _http_get(url: str, token: str, params: dict | None = None) -> dict:
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        # The staging Loki reader serves cold S3-backed reads, so a valid query can legitimately take
+        # far longer than a snappy cluster-local Loki. 30s surfaced real results as "timed out".
+        with urllib.request.urlopen(req, timeout=LOKI_HTTP_TIMEOUT_SECONDS) as resp:
             body = resp.read().decode("utf-8")
             return json.loads(body)
     except urllib.error.HTTPError as e:
