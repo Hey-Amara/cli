@@ -199,6 +199,9 @@ def parse_time_range(
 # ---- LogQL builder -----------------------------------------------------------
 
 
+_LEVEL_LABEL_PATTERNS = {"warn": "warn(ing)?"}
+
+
 def build_logql(
     environment: str,
     service: str,
@@ -209,7 +212,9 @@ def build_logql(
     namespace = NAMESPACES.get(environment, environment)
     selector = f'app="{service}", namespace="{namespace}"'
     if level:
-        selector += f', level="{level.lower()}"'
+        # The app logger emits upper-case levels and Alloy's plain-text fallback
+        # lower-case ones; label matchers are anchored, so match both spellings.
+        selector += f', level=~"(?i){_LEVEL_LABEL_PATTERNS.get(level.lower(), level.lower())}"'
     query = "{" + selector + "}"
     if grep:
         if _REGEX_META.search(grep):
