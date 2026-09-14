@@ -14,6 +14,7 @@ Every URL includes connect_timeout=10 so psql fails fast instead of hanging.
 from __future__ import annotations
 
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -34,6 +35,7 @@ from heyamara_cli.prompts import select
 from heyamara_cli.tunnel import (
     CONNECT_TIMEOUT_SECONDS,
     build_database_url,
+    filter_ssm_online,
     generate_rds_auth_token,
     open_tunnel_and_probe,
     preflight_rds_iam_enabled,
@@ -122,7 +124,7 @@ def _find_eks_node(environment: str, profile: str, region: str) -> str:
             "--filters",
             f"Name=tag:eks:cluster-name,Values={cluster_name}",
             "Name=instance-state-name,Values=running",
-            "--query", "Reservations[].Instances[0].InstanceId",
+            "--query", "Reservations[].Instances[].InstanceId",
             "--output", "text",
             "--region", region,
             "--profile", profile,
@@ -132,12 +134,16 @@ def _find_eks_node(environment: str, profile: str, region: str) -> str:
         environment=environment,
     )
 
-    instance_id = result.stdout.strip().split()[0] if result.stdout.strip() else ""
-    if result.returncode != 0 or not instance_id or instance_id == "None":
+    node_ids = [n for n in result.stdout.split() if n and n != "None"]
+    if result.returncode != 0 or not node_ids:
         click.secho(f"No EKS worker nodes found for {environment} ({cluster_name})", fg="red")
         raise SystemExit(1)
 
-    return instance_id
+    # Spread tunnels across the fleet instead of always the first node. Every
+    # session landing on one node exhausts that node's ssm-agent session slots,
+    # so new tunnels there hang while the rest of the fleet sits idle. Prefer
+    # SSM-online nodes so we don't pick one whose agent hasn't registered.
+    return random.choice(filter_ssm_online(node_ids, profile, region))
 
 
 def _find_rds_endpoint(environment: str, profile: str, region: str) -> tuple[str, int]:

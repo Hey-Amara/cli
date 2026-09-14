@@ -11,19 +11,23 @@ All functions are idempotent and fail-fast with clear error messages.
 from __future__ import annotations
 
 import atexit
+import getpass
 import json
 import os
+import re
 import shutil
 import signal
 import socket
 import subprocess
+import threading
 import time
 import urllib.parse
+from collections import deque
 from typing import Optional
 
 import click
 
-from heyamara_cli.helpers import run
+from heyamara_cli.helpers import _format_access_denied, _is_access_denied, run
 
 
 # Connection timeout baked into every DATABASE_URL we emit.
@@ -101,69 +105,183 @@ def wait_for_tcp(host: str, port: int, timeout: float = 5.0) -> bool:
     return False
 
 
-def start_tunnel_background(
+# The session-manager-plugin prints this verbatim on stdout the moment the
+# session is created (before the data channel opens), so it is captured even for
+# a session that then fails on a saturated node. Hard-coded in the plugin's Go
+# source (no i18n) — the authoritative id, no describe-sessions guessing needed.
+_SESSION_ID_RE = re.compile(r"Starting session with SessionId:\s*(\S+)")
+
+
+def _safe_echo(msg: str) -> None:
+    """click.echo that never raises — stdout may be gone during shutdown/SIGHUP."""
+    try:
+        click.echo(msg)
+    except Exception:
+        pass
+
+
+def filter_ssm_online(instance_ids: list, profile: str, region: str) -> list:
+    """Return the subset of instance_ids whose SSM agent is Online.
+
+    Best-effort: avoids picking a freshly-booted or draining node whose agent
+    hasn't registered (→ TargetNotConnected). Falls back to the full list if the
+    check errors or matches nothing — better to try a node than fail selection.
+    """
+    if not instance_ids:
+        return instance_ids
+    try:
+        r = subprocess.run(
+            ["aws", "ssm", "describe-instance-information",
+             "--filters", "Key=PingStatus,Values=Online",
+             "--query", "InstanceInformationList[].InstanceId",
+             "--output", "text", "--region", region, "--profile", profile],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return instance_ids
+    online = set(r.stdout.split())
+    subset = [i for i in instance_ids if i in online]
+    return subset or instance_ids
+
+
+def _terminate_session(session_id: str, profile: str, region: str) -> None:
+    """Terminate an SSM session server-side. Authoritative close + bounded; never
+    raises. Killing the local plugin does not free the node's session slot, and
+    the plugin's own SIGTERM-triggered terminate is unreliable with SSO creds on
+    some versions — which is how sessions orphan and pile onto a node.
+    """
+    _safe_echo(f"Terminating SSM session {session_id}...")
+    manual = (
+        f"  Close it manually: aws ssm terminate-session --session-id "
+        f"{session_id} --region {region} --profile {profile}"
+    )
+    try:
+        r = subprocess.run(
+            ["aws", "ssm", "terminate-session", "--session-id", session_id,
+             "--region", region, "--profile", profile,
+             "--cli-connect-timeout", "3", "--cli-read-timeout", "5"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        _safe_echo(f"  Could not terminate session {session_id} ({exc}).\n{manual}")
+        return
+    if r.returncode != 0:
+        first = (r.stderr or "").strip().splitlines()
+        detail = f": {first[0]}" if first else ""
+        _safe_echo(f"  Could not terminate session {session_id}{detail}.\n{manual}")
+
+
+def spawn_port_forward(
     instance_id: str,
     remote_host: str,
     remote_port: int,
     local_port: int,
     profile: str,
     region: str,
-) -> subprocess.Popen:
-    """Open an SSM port-forwarding session as a detached subprocess.
+    echo: bool = False,
+) -> tuple:
+    """Open an SSM port-forwarding session and guarantee it is torn down — local
+    process AND server-side session — on exit (atexit + SIGINT/SIGTERM/SIGHUP).
 
-    Registers an atexit handler to kill the session on process exit, including
-    on SIGINT/SIGTERM. Returns the Popen handle so the caller can wait or kill
-    explicitly.
+    The real SessionId is captured from the plugin's stdout so we terminate
+    exactly our own session, even on a saturated node or a fast Ctrl+C. Returns
+    (proc, state); state["cleanup"] is an idempotent teardown callable and
+    state["lines"] holds recent plugin output for diagnostics.
     """
     params = json.dumps({
         "host": [remote_host],
         "portNumber": [str(remote_port)],
         "localPortNumber": [str(local_port)],
     })
+    # Attribute the session so any future orphan is traceable in describe-sessions.
+    reason = f"heyamara-cli {getpass.getuser()}@{socket.gethostname()} pid={os.getpid()}"
 
-    # start_new_session so Ctrl+C in the parent doesn't immediately murder the
-    # SSM agent before we have a chance to tidy up
     proc = subprocess.Popen(
         [
             "aws", "ssm", "start-session",
             "--target", instance_id,
             "--document-name", "AWS-StartPortForwardingSessionToRemoteHost",
             "--parameters", params,
+            "--reason", reason,
             "--region", region,
             "--profile", profile,
         ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        errors="replace",
+        bufsize=1,
+        # Own session/group: the terminal's SIGINT/SIGHUP reach only us, and we
+        # kill the child group ourselves after tidy-up (pgid == pid here).
         start_new_session=True,
     )
 
-    def _cleanup():
+    state: dict = {"session_id": None, "done": False, "lines": deque(maxlen=30)}
+
+    def _reader():
+        # Parse the SessionId from the first matching line and keep draining to
+        # EOF — the plugin prints a line per accepted connection, so a stalled
+        # reader would fill the pipe and block it.
+        try:
+            for line in proc.stdout:
+                line = line.rstrip("\n")
+                state["lines"].append(line)
+                if state["session_id"] is None:
+                    m = _SESSION_ID_RE.search(line)
+                    if m:
+                        state["session_id"] = m.group(1)
+                if echo:
+                    _safe_echo(line)
+        except Exception:
+            return
+
+    reader = threading.Thread(target=_reader, daemon=True)
+    reader.start()
+    state["reader"] = reader
+
+    def _cleanup(*_args):
+        if state["done"]:
+            return
+        state["done"] = True
+        # Terminate server-side FIRST: it frees the scarce node session slot and
+        # makes the plugin exit promptly, so the killpg below usually no-ops.
+        sid = state.get("session_id")
+        if sid:
+            _terminate_session(sid, profile, region)
         if proc.poll() is None:
             try:
-                # Kill the whole process group (start-session spawns plugin)
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                os.killpg(proc.pid, signal.SIGTERM)
                 proc.wait(timeout=3)
             except (ProcessLookupError, subprocess.TimeoutExpired, OSError):
                 try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    os.killpg(proc.pid, signal.SIGKILL)
                 except (ProcessLookupError, OSError):
                     pass
 
     atexit.register(_cleanup)
+    state["cleanup"] = _cleanup
 
-    # Also handle SIGINT / SIGTERM so Ctrl+C cleans up
-    def _signal_handler(signum, frame):
-        _cleanup()
-        raise SystemExit(130 if signum == signal.SIGINT else 143)
+    # SIGHUP (terminal close), SIGTERM (kill), SIGINT (Ctrl+C): close the session
+    # server-side, then chain any handler already installed (e.g. the rabbitmq
+    # /etc/hosts cleanup) rather than clobbering it.
+    def _make_handler(prev):
+        def _handler(signum, frame):
+            _cleanup()
+            if callable(prev):
+                prev(signum, frame)
+            else:
+                raise SystemExit(128 + signum)
+        return _handler
 
-    try:
-        signal.signal(signal.SIGINT, _signal_handler)
-        signal.signal(signal.SIGTERM, _signal_handler)
-    except ValueError:
-        # signal() only works on main thread; caller ran us from a thread
-        pass
+    for _sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(_sig, _make_handler(signal.getsignal(_sig)))
+        except (ValueError, OSError, AttributeError):
+            # not the main thread, or the platform lacks this signal
+            pass
 
-    return proc
+    return proc, state
 
 
 def open_tunnel_and_probe(
@@ -178,37 +296,46 @@ def open_tunnel_and_probe(
     """Start tunnel + probe port + return handle. Fails with clear error if unreachable.
 
     This is the main entry point callers should use. It handles the full
-    'did the tunnel actually work' check.
+    'did the tunnel actually work' check. The session is always terminated
+    server-side on exit (spawn_port_forward wires up atexit + signal cleanup).
     """
-    proc = start_tunnel_background(
-        instance_id, remote_host, remote_port, local_port, profile, region
+    proc, state = spawn_port_forward(
+        instance_id, remote_host, remote_port, local_port, profile, region, echo=False
     )
 
     click.echo(f"Waiting for tunnel to localhost:{local_port}...")
-    if not wait_for_tcp("localhost", local_port, timeout=probe_timeout):
-        # Collect any stderr the SSM plugin printed
-        stderr = b""
-        try:
-            stderr = proc.stderr.read() if proc.stderr else b""
-        except Exception:
-            pass
+    deadline = time.time() + probe_timeout
+    ready = False
+    while time.time() < deadline:
+        if wait_for_tcp("localhost", local_port, timeout=0.5):
+            ready = True
+            break
+        # Bail early if start-session already exited (bad target / auth / port
+        # in use) instead of burning the full probe_timeout.
+        if proc.poll() is not None:
+            break
+
+    if not ready:
+        state["reader"].join(timeout=1)  # let the last plugin lines land
+        recent = "\n".join(state["lines"]).strip()
         click.secho(
             f"\nERROR: Tunnel on localhost:{local_port} is not reachable after "
             f"{probe_timeout}s.",
             fg="red",
             bold=True,
         )
-        click.echo("  Possible causes:")
-        click.echo("    - RDS security group does not allow traffic from the EKS node")
-        click.echo("    - RDS and EKS are in different VPCs")
-        click.echo("    - SSM session failed to start (check your AWS session)")
-        click.echo("    - Another process is already using this port")
-        if stderr:
-            click.echo(f"\n  SSM plugin stderr:\n    {stderr.decode(errors='replace').strip()}")
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except (ProcessLookupError, OSError):
-            pass
+        if recent and _is_access_denied(recent):
+            click.echo(_format_access_denied(recent))
+        else:
+            click.echo("  Possible causes:")
+            click.echo("    - RDS security group does not allow traffic from the EKS node")
+            click.echo("    - RDS and EKS are in different VPCs")
+            click.echo("    - SSM session failed to start (check your AWS session)")
+            click.echo("    - Another process is already using this port")
+            if recent:
+                indented = recent.replace("\n", "\n    ")
+                click.echo(f"\n  SSM plugin output:\n    {indented}")
+        state["cleanup"]()
         raise SystemExit(1)
 
     click.secho("✓ Tunnel ready", fg="green")
