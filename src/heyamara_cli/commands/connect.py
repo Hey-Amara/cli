@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import gzip
 import json
+import random
 import shutil
 import signal
 import subprocess
@@ -14,7 +15,15 @@ import click
 from heyamara_cli import config
 from heyamara_cli.completions import ENVIRONMENT
 from heyamara_cli.config import CLUSTERS, NAMESPACES, SERVICES as APP_SERVICES, SSM_PREFIX
-from heyamara_cli.helpers import check_port_free, debug, detect_iam_role, require_aws_session, run
+from heyamara_cli.helpers import (
+    _format_access_denied,
+    _is_access_denied,
+    check_port_free,
+    debug,
+    detect_iam_role,
+    require_aws_session,
+    run,
+)
 from heyamara_cli.prompts import select
 from heyamara_cli.secret_files import UnsafeSecretFileError, write_secret_text
 from heyamara_cli.tunnel import (
@@ -22,9 +31,11 @@ from heyamara_cli.tunnel import (
     build_database_url,
     discover_databases,
     generate_rds_auth_token as _generate_rds_auth_token_new,
+    filter_ssm_online,
     open_tunnel_and_probe,
     preflight_rds_iam_enabled,
     probe_iam_auth,
+    spawn_port_forward,
 )
 
 
@@ -59,7 +70,7 @@ def _find_eks_node(environment: str, profile: str, region: str) -> str:
             "--filters",
             f"Name=tag:eks:cluster-name,Values={cluster_name}",
             "Name=instance-state-name,Values=running",
-            "--query", "Reservations[].Instances[0].InstanceId",
+            "--query", "Reservations[].Instances[].InstanceId",
             "--output", "text",
             "--region", region,
             "--profile", profile,
@@ -69,30 +80,39 @@ def _find_eks_node(environment: str, profile: str, region: str) -> str:
         environment=environment,
     )
 
-    instance_id = result.stdout.strip().split()[0] if result.stdout.strip() else ""
-    if result.returncode != 0 or not instance_id or instance_id == "None":
+    node_ids = [n for n in result.stdout.split() if n and n != "None"]
+    if result.returncode != 0 or not node_ids:
         click.secho(f"No EKS worker nodes found for {environment} ({cluster_name})", fg="red")
         raise SystemExit(1)
 
-    return instance_id
+    # Spread tunnels across the fleet instead of always the first node. Every
+    # session landing on one node exhausts that node's ssm-agent session slots,
+    # so new tunnels there hang while the rest of the fleet sits idle. Prefer
+    # SSM-online nodes so we don't pick one whose agent hasn't registered.
+    return random.choice(filter_ssm_online(node_ids, profile, region))
 
 
 def _start_tunnel(instance_id: str, remote_host: str, remote_port: int, local_port: int, profile: str, region: str):
     """Start SSM port-forwarding session through an EKS node."""
-    params = json.dumps({
-        "host": [remote_host],
-        "portNumber": [str(remote_port)],
-        "localPortNumber": [str(local_port)],
-    })
+    # Run the tunnel in the foreground until the user exits it. spawn_port_forward
+    # captures the real SessionId from the plugin's stdout and terminates the
+    # session server-side on exit (Ctrl+C, terminal close, kill) so it never
+    # orphans and piles onto the node.
+    proc, state = spawn_port_forward(
+        instance_id, remote_host, remote_port, local_port, profile, region, echo=True
+    )
+    try:
+        rc = proc.wait()
+    finally:
+        state["cleanup"]()
 
-    run([
-        "aws", "ssm", "start-session",
-        "--target", instance_id,
-        "--document-name", "AWS-StartPortForwardingSessionToRemoteHost",
-        "--parameters", params,
-        "--region", region,
-        "--profile", profile,
-    ])
+    # Preserve the old `run(check=True)` behaviour: non-zero plugin exit fails
+    # the command, and an access-denied start gets the friendly hint.
+    if rc:
+        text = "\n".join(state["lines"])
+        if _is_access_denied(text):
+            click.echo(_format_access_denied(text))
+        raise SystemExit(rc)
 
 
 def _find_rds_endpoint(environment: str, profile: str, region: str) -> tuple[str, int]:
