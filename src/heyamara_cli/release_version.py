@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -55,6 +56,18 @@ def parse_git_tag_output(output: str) -> str:
     return max(candidates)[1] if candidates else ""
 
 
+# git/gh will block forever on a credential or passphrase prompt, which a
+# timeout on the parent does not cover. Fail the probe instead of prompting.
+_NON_INTERACTIVE_ENV = {
+    "GIT_TERMINAL_PROMPT": "0",
+    "GIT_ASKPASS": "",
+    "GCM_INTERACTIVE": "never",
+    "GIT_SSH_COMMAND": "ssh -oBatchMode=yes",
+    "GH_NO_UPDATE_NOTIFIER": "1",
+    "GH_PROMPT_DISABLED": "1",
+}
+
+
 def _run(command: list[str], timeout: Optional[float]) -> Optional[subprocess.CompletedProcess]:
     try:
         return subprocess.run(
@@ -62,6 +75,8 @@ def _run(command: list[str], timeout: Optional[float]) -> Optional[subprocess.Co
             capture_output=True,
             text=True,
             timeout=timeout,
+            stdin=subprocess.DEVNULL,
+            env={**os.environ, **_NON_INTERACTIVE_ENV},
         )
     except (OSError, subprocess.TimeoutExpired):
         return None

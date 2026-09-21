@@ -152,6 +152,23 @@ class ReleaseVersionTests(unittest.TestCase):
         self.assertEqual(fetch_latest_release_version("Hey-Amara/cli"), "1.8.4")
         self.assertEqual(run_mock.call_count, 2)
 
+    @mock.patch("heyamara_cli.release_version.shutil.which", return_value=None)
+    @mock.patch("heyamara_cli.release_version.subprocess.run")
+    def test_probe_never_waits_on_a_credential_prompt(self, run_mock, _which_mock):
+        """A timeout on the parent does not cover git/ssh blocking on a prompt."""
+        run_mock.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=ANNOTATED_TAGS, stderr=""
+        )
+
+        fetch_latest_release_version("Hey-Amara/cli", timeout=5)
+
+        kwargs = run_mock.call_args.kwargs
+        self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(kwargs["env"]["GIT_TERMINAL_PROMPT"], "0")
+        self.assertEqual(kwargs["env"]["GIT_SSH_COMMAND"], "ssh -oBatchMode=yes")
+        # inherits the real environment, not a stripped one
+        self.assertIn("PATH", kwargs["env"])
+
 
 if __name__ == "__main__":
     unittest.main()
