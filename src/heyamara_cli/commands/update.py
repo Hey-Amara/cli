@@ -15,10 +15,14 @@ from heyamara_cli.release_version import fetch_latest_release_version
 REPO = "Hey-Amara/cli"
 GIT_URL = f"git+https://github.com/{REPO}.git"
 
+# fetch_latest_release_version defaults to no timeout, which let `update` — the
+# one command you run to escape a hang — block forever on gh/git ls-remote.
+LOOKUP_TIMEOUT = 15
+
 
 def _get_latest_version() -> str:
     """Fetch the latest canonical release version."""
-    return fetch_latest_release_version(REPO)
+    return fetch_latest_release_version(REPO, timeout=LOOKUP_TIMEOUT)
 
 
 _VERSION_RE = re.compile(r"(\d+\.\d+\.\d+(?:[\w.+-]*)?)")

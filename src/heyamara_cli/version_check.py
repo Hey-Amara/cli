@@ -1,4 +1,4 @@
-"""Non-blocking update check — runs in background, caches result for 24h."""
+"""Best-effort update check with local cache/backoff."""
 
 from __future__ import annotations
 
@@ -15,7 +15,25 @@ from heyamara_cli.release_version import fetch_latest_release_version
 CACHE_DIR = Path.home() / ".heyamara"
 CACHE_FILE = CACHE_DIR / ".update-check"
 CHECK_INTERVAL = 86400  # 24 hours
+FAILURE_RETRY_INTERVAL = 3600  # 1 hour
+FETCH_TIMEOUT = 5
 REPO = "Hey-Amara/cli"
+
+
+def _normalize_cache(raw: object) -> dict:
+    """Return only well-formed cache fields; malformed cache is a cache miss."""
+    if not isinstance(raw, dict):
+        return {}
+
+    latest = raw.get("latest", "")
+    checked_at = raw.get("checked_at", 0)
+    if isinstance(checked_at, bool) or not isinstance(checked_at, (int, float)):
+        return {}
+    if not isinstance(latest, str) or not latest:
+        return {}
+
+    failed = raw.get("failed", False)
+    return {"latest": latest, "checked_at": checked_at, "failed": failed is True}
 
 
 def _read_cache() -> dict:
@@ -23,29 +41,46 @@ def _read_cache() -> dict:
     try:
         if CACHE_FILE.exists():
             with open(CACHE_FILE) as f:
-                return json.load(f)
-    except (json.JSONDecodeError, OSError):
+                return _normalize_cache(json.load(f))
+    except (json.JSONDecodeError, OSError, TypeError, UnicodeDecodeError):
         pass
     return {}
 
 
-def _write_cache(latest: str) -> None:
-    """Write a version check result to cache."""
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    with open(CACHE_FILE, "w") as f:
-        json.dump({"latest": latest, "checked_at": time.time()}, f)
+def _write_cache(latest: str, *, failed: bool = False) -> None:
+    """Write a version check result to cache.
+
+    Written via temp file + os.replace so a Ctrl+C mid-write cannot truncate an
+    existing good cache into the malformed state _read_cache has to recover from.
+    """
+    temp_file = CACHE_FILE.with_name(f".{CACHE_FILE.name}.{os.getpid()}.tmp")
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        with open(temp_file, "w") as f:
+            json.dump({"latest": latest, "checked_at": time.time(), "failed": failed}, f)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_file, CACHE_FILE)
+    except OSError:
+        pass
+    finally:
+        try:
+            temp_file.unlink()
+        except OSError:
+            pass
 
 
 def _fetch_latest_version() -> str:
     """Fetch latest release tag from GitHub (quick, silent)."""
-    return fetch_latest_release_version(REPO, timeout=5)
+    return fetch_latest_release_version(REPO, timeout=FETCH_TIMEOUT)
 
 
 def check_and_notify() -> None:
     """Check for updates and print a notification if a newer version exists.
 
     - Reads from cache if checked within the last 24 hours.
-    - Fetches from GitHub otherwise (with 5s timeout — won't block the CLI).
+    - Fetches from GitHub otherwise with a short timeout and failure backoff.
     - Prints a single yellow line if an update is available, then continues.
     """
     try:
@@ -56,14 +91,19 @@ def check_and_notify() -> None:
     cache = _read_cache()
     now = time.time()
 
-    # Use cache if fresh enough
-    if cache.get("checked_at") and (now - cache["checked_at"]) < CHECK_INTERVAL:
+    # Use cache if fresh enough. Failed checks get a shorter backoff so every
+    # CLI invocation does not repeat a slow network probe while GitHub is
+    # blocked or unreachable.
+    interval = FAILURE_RETRY_INTERVAL if cache.get("failed") else CHECK_INTERVAL
+    if cache.get("checked_at") and (now - cache["checked_at"]) < interval:
         latest = cache.get("latest", "")
     else:
         # Fetch and cache
         latest = _fetch_latest_version()
         if latest:
             _write_cache(latest)
+        else:
+            _write_cache(current, failed=True)
 
     if latest and _is_newer(latest, current):
         click.secho(
